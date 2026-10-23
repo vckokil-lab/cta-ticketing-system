@@ -8,16 +8,88 @@
  Assessment  : Assignment Task 3 – Implementation & Testing
  Description : A zone-based ticketing system for the Centrala Underground.
                Built with Python (tkinter) following PEP 8 style guidelines.
- Version     : 3.0.0
- Date        : March 2026
+ Version     : 4.1.0 (IQA amendment + enhancements – October 2026)
+ Date        : March 2026 (amended September and October 2026)
+ File        : level4-Unit2_CTA_Automatedticketingsystem.py
+=============================================================================
+
+HOW TO RUN
+----------
+  python level4-Unit2_CTA_Automatedticketingsystem.py            (GUI)
+  python level4-Unit2_CTA_Automatedticketingsystem.py --selftest (tests)
+
+The --selftest option runs the automated checks in run_self_tests()
+without opening the GUI. They verify the reference data against
+Appendix 1, the fare arithmetic against Appendix 2, the voucher
+breakdown (including zero-count categories) and reference uniqueness.
+ReportLab (pip install reportlab) is needed only for the optional PDF
+receipt; the rest of the program runs without it.
+
+CHANGE LOG
+----------
+v4.1.0  October 2026 – enhancements (all OPTIONAL, beyond the brief).
+  Each is tagged [ENH-n] in the code so it can be found with a search.
+  [ENH-1] Station finder. The traveller types a station name and the
+          system shows its zone and can select it as the boarding or
+          destination zone. Answers the usability problem found in
+          user testing: travellers know their STATION, but the brief
+          asks them to choose a ZONE. Case-insensitive, with
+          "did you mean" suggestions for partial or mistyped names.
+  [ENH-2] Live fare preview. The traveller screen shows the running
+          total and traveller count while counts are entered, so the
+          cost is visible before the payment step.
+  [ENH-3] Transaction log. Every issued voucher is appended to
+          cta_transactions.csv (reference, time, zones, counts, total,
+          payment method). Gives CTA an audit trail and a record for
+          reconciling takings. No personal data is recorded.
+  [ENH-4] Staff sales summary. A button on the stations board reads
+          the transaction log and shows today's vouchers, travellers,
+          takings and payment-method split.
+  [ENH-5] Kiosk idle timeout. After 2 minutes with no activity the
+          system resets and returns to the stations board, so a
+          half-finished journey is not left for the next traveller.
+          It never fires while a payment dialog is open.
+  [ENH-6] Keyboard shortcuts. Enter = Continue, Escape = Back, on every
+          screen where those actions exist. Supports users who cannot
+          use a mouse or touch screen easily (accessibility).
+  [ENH-7] Error log. Unexpected errors (printing, PDF, log file) are
+          written to cta_ticketing.log with a timestamp, so support
+          staff can diagnose problems after handover (AC 4M1).
+v4.0.0  October 2026 – IQA feedback (16.10.2026)
+  [AC 2.1/3.1] ZONES matches Appendix 1: Lomil to Central; Riclya,
+         Sylas to Midtown (10/12/14). Checked at start-up.
+  [AC 2.2/3.1] Voucher and PDF list all four categories, including
+         zero counts, from one shared function.
+  [AC 3.1/4.2] "New Ticket" also clears zone and traveller inputs.
+  [AC 4.2] References unique even within the same second.
+  [AC 4.2] Issue time and reference fixed once, at payment.
+  [AC 4.2] PDF preview stays open after saving; save errors caught.
+  [Fix]  Preview scrolling, card delay and payment-method crash fixed.
+v3.5.0  September 2026 – fares held and shown in integer cents.
+=============================================================================
+
+SCOPE: MANDATORY BRIEF REQUIREMENTS vs OPTIONAL EXTENSIONS
+-----------------------------------------------------------
+Mandatory (Appendix 2): alphabetical stations board by zone; numbered
+start-zone and destination-zone menus; Adult/Child/Senior/Student counts;
+voucher with issue date and time, boarding zone, destination zone, zones
+travelled, count / fare / total for each category, total travellers,
+total fare; option to issue another voucher or end the program.
+
+Optional extensions (NOT required by the brief): simulated Card, Cash
+and PayPal payment dialogs, printing, the PDF receipt, and the seven
+enhancements [ENH-1] to [ENH-7] listed above. The payments are
+simulations only: no real payment is taken and no card or account
+details are stored or transmitted.
 =============================================================================
 
 DESIGN OVERVIEW
 ---------------
-The application follows an event-driven programming paradigm using tkinter.
-It uses a Frame-stacking technique: all screens are created at startup and
-raised to the top as the user navigates. This avoids screen flickering and
-provides a smooth, professional user experience.
+The application is object-oriented (one class per screen) and
+event-driven (tkinter callbacks). Pure calculation logic is kept in
+module-level functions with no GUI dependency, so it can be unit-tested
+on its own (modular design). Screens use a Frame-stacking technique:
+all screens are created at start-up and raised as the user navigates.
 
 Screens (in journey order):
   1. WelcomeScreen       – Station board (Central, Midtown, Downtown)
@@ -42,8 +114,13 @@ CODING STANDARDS (PEP 8)
 # ---------------------------------------------------------------------------
 # STANDARD LIBRARY IMPORTS
 # ---------------------------------------------------------------------------
+import csv                                 # [ENH-3] Transaction log
+import itertools                           # Reference sequence counter
+import logging                             # [ENH-7] Error log
 import os                                  # OS-level file operations
+import shutil                              # Copying the saved PDF
 import subprocess                          # Cross-platform process launching
+import sys                                 # Command-line arguments
 import tempfile                            # Temporary file creation
 import tkinter as tk                       # Core GUI framework
 from datetime import datetime              # Timestamp for vouchers
@@ -67,81 +144,132 @@ except ImportError:
 # APPLICATION-WIDE CONSTANTS
 # ---------------------------------------------------------------------------
 
-# Fare rates expressed in PENCE per zone (integer arithmetic avoids
-# floating-point rounding errors). Original spec: 2105 / 1410 / 1025 /
-# 1750 CENTS – mapped directly to pence and displayed as pound sterling.
-ADULT_FARE_PER_ZONE   = 2105   # £21.05 per zone
-CHILD_FARE_PER_ZONE   = 1410   # £14.10 per zone
-SENIOR_FARE_PER_ZONE  = 1025   # £10.25 per zone
-STUDENT_FARE_PER_ZONE = 1750   # £17.50 per zone
+# Fare rates specified by the client in CENTS per zone.
+# Values are retained exactly as stated in Appendix 2 of the client
+# brief. Integer arithmetic preserves these values exactly and avoids
+# floating-point rounding. No conversion to any other currency unit is
+# performed at any point in the application.
+ADULT_FARE_PER_ZONE = 2105   # 2105 cents per zone
+CHILD_FARE_PER_ZONE = 1410   # 1410 cents per zone
+SENIOR_FARE_PER_ZONE = 1025   # 1025 cents per zone
+STUDENT_FARE_PER_ZONE = 1750   # 1750 cents per zone
 
 # Colour palette – CTA brand colours (dark navy + gold accent)
-COLOUR_BG       = "#1B2A4A"   # Dark navy – primary background
-COLOUR_PANEL    = "#243860"   # Lighter navy – card backgrounds
-COLOUR_ACCENT   = "#F0A500"   # Gold – primary accent
-COLOUR_WHITE    = "#FFFFFF"   # White – primary text on dark background
-COLOUR_LIGHT    = "#C8D6E5"   # Light blue-grey – secondary text
-COLOUR_SUCCESS  = "#27AE60"   # Green – success / confirmed actions
-COLOUR_DANGER   = "#E74C3C"   # Red – errors / warnings
+COLOUR_BG = "#1B2A4A"   # Dark navy – primary background
+COLOUR_PANEL = "#243860"   # Lighter navy – card backgrounds
+COLOUR_ACCENT = "#F0A500"   # Gold – primary accent
+COLOUR_WHITE = "#FFFFFF"   # White – primary text on dark background
+COLOUR_LIGHT = "#C8D6E5"   # Light blue-grey – secondary text
+COLOUR_SUCCESS = "#27AE60"   # Green – success / confirmed actions
+COLOUR_DANGER = "#E74C3C"   # Red – errors / warnings
 COLOUR_INPUT_BG = "#2E4070"   # Slightly lighter – input field backgrounds
-COLOUR_BTN      = "#F0A500"   # Gold – primary button fill
+COLOUR_BTN = "#F0A500"   # Gold – primary button fill
 COLOUR_BTN_TEXT = "#1B2A4A"   # Navy – text on gold buttons
-COLOUR_PAYPAL   = "#003087"   # PayPal dark blue
-COLOUR_PAYPAL2  = "#009CDE"   # PayPal light blue
-COLOUR_CASH     = "#1E8449"   # Green for cash
-COLOUR_CARD     = "#1A3A6B"   # Navy for card
+COLOUR_PAYPAL = "#003087"   # PayPal dark blue
+COLOUR_PAYPAL2 = "#009CDE"   # PayPal light blue
+COLOUR_CASH = "#1E8449"   # Green for cash
+COLOUR_CARD = "#1A3A6B"   # Navy for card
 
 # Font definitions
-FONT_TITLE      = ("Georgia", 22, "bold")
-FONT_HEADING    = ("Georgia", 14, "bold")
+FONT_TITLE = ("Georgia", 22, "bold")
+FONT_HEADING = ("Georgia", 14, "bold")
 FONT_SUBHEADING = ("Calibri", 12, "bold")
-FONT_BODY       = ("Calibri", 11)
-FONT_SMALL      = ("Calibri", 9)
-FONT_MONO       = ("Courier New", 10)   # Voucher / receipt output
+FONT_BODY = ("Calibri", 11)
+FONT_SMALL = ("Calibri", 9)
+FONT_MONO = ("Courier New", 10)   # Voucher / receipt output
 
 
 # ---------------------------------------------------------------------------
 # DATA – CENTRALA UNDERGROUND ZONE AND STATION DEFINITIONS
 # ---------------------------------------------------------------------------
-# Station names taken directly from the assignment brief (Appendix 1).
+# Station names and zone membership are taken directly from the
+# Centrala Underground map in Appendix 1 of the client brief.
 # Zone numbers map to concentric zones: 1 = Central (innermost),
 # 2 = Midtown, 3 = Downtown (outermost).
 # Fare formula: zones_travelled = abs(destination - start) + 1
+#
+# IQA October 2026 (AC 2.1 / 3.1): Lomil is inside the Central Zone
+# boundary on the map, so it belongs to Central. Riclya and Sylas sit
+# between the Central and Midtown boundaries, so they belong to Midtown.
+# Version 3.5 had these three stations in the wrong zones (11/11/14).
+# Each list is kept in alphabetical order, as Appendix 2 requires.
 ZONES = {
     1: {
         "name": "Central",
         "description": "City centre hub",
-        "stations": [
-            "Centrala", "Frestin", "Jaund", "Rede", "Soth"
+        "stations": [                                    # 10 stations
+            "Bylyn", "Centrala", "Frestin", "Jaund", "Lomil",
+            "Ninia", "Rede", "Soth", "Tallan", "Yaen"
         ]
     },
     2: {
         "name": "Midtown",
         "description": "Inner residential & commercial",
-        "stations": [
-            "Agralle", "Bylyn", "Docia", "Garion", "Lomil",
-            "Ninia", "Obelyn", "Quthiel", "Ralith", "Riclya",
-            "Riladia", "Stonyam", "Sylas", "Tallan", "Wicyt", "Yaen"
+        "stations": [                                    # 12 stations
+            "Agralle", "Docia", "Garion", "Obelyn", "Oloadus",
+            "Quthiel", "Ralith", "Riclya", "Riladia", "Stonyam",
+            "Sylas", "Wicyt"
         ]
     },
     3: {
         "name": "Downtown",
         "description": "Outer suburbs & interchange",
-        "stations": [
+        "stations": [                                    # 14 stations
             "Adohad", "Brunad", "Ederif", "Elyot", "Erean",
-            "Holmer", "Keivia", "Marend", "Oloadus", "Perinad",
-            "Pryn", "Ruril", "Ryall", "Vertwall", "Zord"
+            "Holmer", "Keivia", "Marend", "Perinad", "Pryn",
+            "Ruril", "Ryall", "Vertwall", "Zord"
         ]
     }
 }
 
-# Traveller fare configuration – drives the dynamic input form
+# Expected number of stations per zone, counted from the Appendix 1 map.
+# Used by validate_reference_data() as an independent cross-check.
+EXPECTED_STATION_COUNTS = {1: 10, 2: 12, 3: 14}
+
+# Traveller fare configuration – drives the input form, the voucher and
+# the PDF. The order of this list is the order shown on every output.
 TRAVELLER_TYPES = [
     {"key": "adult",   "label": "Adults",   "fare": ADULT_FARE_PER_ZONE},
     {"key": "child",   "label": "Children", "fare": CHILD_FARE_PER_ZONE},
     {"key": "senior",  "label": "Seniors",  "fare": SENIOR_FARE_PER_ZONE},
     {"key": "student", "label": "Students", "fare": STUDENT_FARE_PER_ZONE},
 ]
+
+# Upper limit on travellers of one type in a single voucher. This is a
+# design assumption (not stated in the brief) that guards against
+# accidental entries such as 1000 instead of 10.
+MAX_TRAVELLERS_PER_TYPE = 50
+
+# [ENH-3] / [ENH-7] Files are written next to this program so they are
+# easy for CTA staff to find. os.path.abspath(__file__) makes this work
+# whichever folder the program is started from.
+APP_FOLDER = os.path.dirname(os.path.abspath(__file__))
+TRANSACTION_LOG_FILE = os.path.join(APP_FOLDER, "cta_transactions.csv")
+ERROR_LOG_FILE = os.path.join(APP_FOLDER, "cta_ticketing.log")
+
+# [ENH-3] Column order of the transaction log. Defined once so that the
+# writer and the reader can never use different column names.
+TRANSACTION_FIELDS = [
+    "reference", "date", "time", "boarding_zone", "destination_zone",
+    "zones_travelled", "adults", "children", "seniors", "students",
+    "total_travellers", "total_cents", "payment_method",
+]
+
+# [ENH-5] Kiosk idle timeout in milliseconds (2 minutes). A design
+# assumption: long enough to count change or find a card, short enough
+# that an abandoned journey is cleared before the next traveller.
+IDLE_TIMEOUT_MS = 120_000
+
+# [ENH-7] Module logger. Configured in configure_logging(); until then
+# messages are simply discarded, so importing this file for the
+# self-tests never creates a log file as a side effect.
+logger = logging.getLogger("cta_ticketing")
+logger.addHandler(logging.NullHandler())
+
+# Per-session sequence used to make every voucher reference unique.
+# itertools.count() never repeats, so two vouchers issued within the
+# same second still receive different references (IQA AC 4.2).
+_REFERENCE_SEQUENCE = itertools.count(1)
 
 
 # ===========================================================================
@@ -172,33 +300,37 @@ def calculate_fare(
     fare_per_zone: int, zones: int, count: int
 ) -> int:
     """
-    Calculate the total fare in PENCE for a group of travellers.
+    Calculate the total fare in CENTS for a group of travellers.
+
+    Example: Adult, 3 zones, 1 traveller -> 2105 * 3 * 1 = 6315 cents
 
     Args:
-        fare_per_zone (int): Rate in PENCE per zone for the traveller type.
+        fare_per_zone (int): Rate in CENTS per zone for the traveller type.
         zones         (int): Number of zones travelled.
         count         (int): Number of travellers of this type.
 
     Returns:
-        int: Total fare in PENCE.
+        int: Total fare in CENTS.
     """
     return fare_per_zone * zones * count
 
 
-def pence_to_display(pence: int) -> str:
+def cents_to_display(cents: int) -> str:
     """
-    Convert a PENCE amount to a formatted pound sterling string.
+    Return a fare amount using the unit specified in the client brief.
 
-    Stores fares as integers to avoid floating-point rounding errors;
-    converts here purely for human-readable display and printing.
+    Fares are stored and calculated as integer cents. This helper
+    formats the amount for display and printing WITHOUT any currency
+    conversion (no division by 100 and no currency symbol), so the value
+    shown is always the exact integer stated or calculated.
 
     Args:
-        pence (int): Amount in pence.
+        cents (int): Amount in cents.
 
     Returns:
-        str: Formatted string, e.g. 2105 -> "£21.05"
+        str: Formatted string, e.g. 2105 -> "2105 cents"
     """
-    return f"\u00a3{pence / 100:.2f}"
+    return f"{cents} cents"
 
 
 def validate_positive_integer(
@@ -228,7 +360,303 @@ def validate_positive_integer(
             f"{field_name}: Must be a whole number (e.g. 0, 1, 2)."
         )
 
-    return True, int(stripped), ""
+    number = int(stripped)
+    if number > MAX_TRAVELLERS_PER_TYPE:
+        return (
+            False, None,
+            f"{field_name}: A maximum of {MAX_TRAVELLERS_PER_TYPE} "
+            f"travellers of one type can be added to one voucher."
+        )
+
+    return True, number, ""
+
+
+def build_fare_breakdown(travellers: dict, zones: int) -> dict:
+    """
+    Build the complete fare breakdown for one voucher.
+
+    This is the SINGLE source of fare figures for the on-screen voucher,
+    the printed text and the PDF receipt, so the three can never
+    disagree. Every traveller category is ALWAYS included, even when its
+    count is 0, because Appendix 2 requires the voucher to display the
+    number of travellers and the fare for each category
+    (IQA October 2026, AC 2.2 / 3.1).
+
+    Example: 1 traveller of each type over 3 zones
+             (2105 + 1410 + 1025 + 1750) * 3 = 18870 cents
+
+    Args:
+        travellers (dict): Counts keyed by 'adult', 'child', 'senior',
+                           'student'. Missing keys are treated as 0.
+        zones      (int) : Number of zones travelled.
+
+    Returns:
+        dict: {
+            "rows":        list of dicts, one per category, in
+                           TRAVELLER_TYPES order, each with
+                           key, label, count, rate, zones, total,
+            "total_pax":   int, total number of travellers,
+            "total_cents": int, total fare in cents
+        }
+    """
+    rows = []
+    for t_type in TRAVELLER_TYPES:
+        count = travellers.get(t_type["key"], 0)
+        rows.append({
+            "key":   t_type["key"],
+            "label": t_type["label"],
+            "count": count,
+            "rate":  t_type["fare"],
+            "zones": zones,
+            "total": calculate_fare(t_type["fare"], zones, count),
+        })
+
+    return {
+        "rows":        rows,
+        "total_pax":   sum(row["count"] for row in rows),
+        "total_cents": sum(row["total"] for row in rows),
+    }
+
+
+def generate_reference(issue_time: datetime) -> str:
+    """
+    Create a unique voucher reference number.
+
+    Format: CTA-YYYYMMDD-HHMMSS-NNNN
+    The date and time identify when the voucher was issued; NNNN is a
+    sequence number that increases by one for every voucher in the
+    session. Version 3.5 used the time to the second only, so two
+    vouchers issued within the same second shared a reference
+    (IQA October 2026, AC 4.2).
+
+    Limitation: the sequence restarts when the program is restarted.
+    The timestamp keeps references unique between sessions on one
+    machine. A multi-kiosk deployment would need a central sequence.
+
+    Args:
+        issue_time (datetime): Time the voucher was issued.
+
+    Returns:
+        str: e.g. "CTA-20261023-143005-0001"
+    """
+    sequence = next(_REFERENCE_SEQUENCE)
+    return f"CTA-{issue_time.strftime('%Y%m%d-%H%M%S')}-{sequence:04d}"
+
+
+def validate_reference_data() -> list:
+    """
+    Check the ZONES reference data against Appendix 1.
+
+    Checks that each zone has the expected number of stations, that
+    each list is alphabetical, and that no station appears twice.
+    Called at start-up and by the self-tests, so a data-entry error
+    of the kind found at IQA is detected before travellers see it.
+
+    Returns:
+        list: Error messages. An empty list means the data is valid.
+    """
+    errors = []
+    seen = set()
+
+    for zone_num, zone in ZONES.items():
+        stations = zone["stations"]
+        expected = EXPECTED_STATION_COUNTS[zone_num]
+
+        if len(stations) != expected:
+            errors.append(
+                f"{zone['name']}: {len(stations)} stations, "
+                f"expected {expected} (Appendix 1)."
+            )
+        if stations != sorted(stations):
+            errors.append(f"{zone['name']}: stations not alphabetical.")
+
+        for station in stations:
+            if station in seen:
+                errors.append(f"{station} appears in more than one zone.")
+            seen.add(station)
+
+    return errors
+
+
+# ===========================================================================
+# ENHANCEMENT HELPERS (no GUI code, so each can be unit-tested)
+# ===========================================================================
+
+def find_station(name: str):
+    """
+    [ENH-1] Look up which zone a station is in.
+
+    The search ignores capital letters and surrounding spaces, so
+    "lomil", "LOMIL" and " Lomil " all find Lomil.
+
+    Args:
+        name (str): Station name typed by the traveller.
+
+    Returns:
+        tuple | None: (zone_number, station_name_as_on_map), or None if
+                      no station has exactly that name.
+    """
+    wanted = name.strip().lower()
+    for zone_num, zone in ZONES.items():
+        for station in zone["stations"]:
+            if station.lower() == wanted:
+                return zone_num, station
+    return None
+
+
+def suggest_stations(text: str, limit: int = 5) -> list:
+    """
+    [ENH-1] Suggest station names for a partial or mistyped entry.
+
+    Names that START with the text are listed first, then names that
+    CONTAIN it anywhere. Example: "ri" gives Riclya and Riladia first
+    (they start with "ri"), then Ederif, Garion and Perinad (they
+    contain "ri"), stopping at the limit of five. Starting matches
+    come first because travellers usually type the start of a name.
+
+    Args:
+        text  (str): What the traveller has typed so far.
+        limit (int): Maximum number of suggestions to return.
+
+    Returns:
+        list: Station names in alphabetical order within each group.
+    """
+    wanted = text.strip().lower()
+    if not wanted:
+        return []
+
+    all_stations = sorted(
+        station for zone in ZONES.values() for station in zone["stations"]
+    )
+    starts = [s for s in all_stations if s.lower().startswith(wanted)]
+    contains = [
+        s for s in all_stations
+        if wanted in s.lower() and s not in starts
+    ]
+    return (starts + contains)[:limit]
+
+
+def configure_logging(log_path: str = ERROR_LOG_FILE):
+    """
+    [ENH-7] Send warnings and errors to a log file.
+
+    Only WARNING and above are recorded, so normal use does not fill the
+    disk. If the log file cannot be opened (for example a read-only
+    folder) the program carries on without it rather than failing.
+
+    Args:
+        log_path (str): Full path of the log file.
+    """
+    try:
+        handler = logging.FileHandler(log_path, encoding="utf-8")
+    except OSError:
+        return                      # Logging is helpful, not essential
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s")
+    )
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
+
+
+def record_transaction(details: dict,
+                       log_path: str = TRANSACTION_LOG_FILE):
+    """
+    [ENH-3] Append one issued voucher to the CSV transaction log.
+
+    CSV was chosen over a database because it needs no extra software,
+    opens directly in Excel for CTA finance staff, and is easy to back
+    up. The trade-off is that it is not designed for many kiosks
+    writing at once; a shared database would be needed for that.
+
+    The header row is written only when the file is new or empty.
+    Opening in append mode ("a") means earlier records are never
+    overwritten.
+
+    Args:
+        details  (dict): Output of VoucherScreen.transaction_details()
+                         (or the same keys built by a test).
+        log_path (str) : Full path of the CSV file.
+
+    Raises:
+        OSError: If the file cannot be written. The caller decides how
+                 to tell the user; the voucher is still valid.
+    """
+    rows = details["breakdown"]["rows"]
+    counts = {row["key"]: row["count"] for row in rows}
+    issue_time = details["issue_time"]
+
+    record = {
+        "reference":        details["reference"],
+        "date":             issue_time.strftime("%Y-%m-%d"),
+        "time":             issue_time.strftime("%H:%M:%S"),
+        "boarding_zone":    details["start_name"],
+        "destination_zone": details["dest_name"],
+        "zones_travelled":  details["zones"],
+        "adults":           counts["adult"],
+        "children":         counts["child"],
+        "seniors":          counts["senior"],
+        "students":         counts["student"],
+        "total_travellers": details["breakdown"]["total_pax"],
+        "total_cents":      details["breakdown"]["total_cents"],
+        "payment_method":   details["payment"],
+    }
+
+    is_new = (not os.path.exists(log_path)
+              or os.path.getsize(log_path) == 0)
+
+    # newline="" stops the csv module adding blank lines on Windows
+    with open(log_path, "a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=TRANSACTION_FIELDS)
+        if is_new:
+            writer.writeheader()
+        writer.writerow(record)
+
+
+def summarise_sales(log_path: str = TRANSACTION_LOG_FILE,
+                    on_date: str = None) -> dict:
+    """
+    [ENH-4] Summarise the transaction log for one day.
+
+    Rows that cannot be read (for example after someone edits the file
+    by hand) are counted as skipped rather than stopping the summary.
+
+    Args:
+        log_path (str): Full path of the CSV file.
+        on_date  (str): Date as "YYYY-MM-DD". Defaults to today.
+
+    Returns:
+        dict: vouchers, travellers, total_cents, by_payment (dict of
+              method -> number of vouchers) and skipped (int).
+    """
+    on_date = on_date or datetime.now().strftime("%Y-%m-%d")
+    summary = {
+        "date": on_date, "vouchers": 0, "travellers": 0,
+        "total_cents": 0, "by_payment": {}, "skipped": 0,
+    }
+
+    if not os.path.exists(log_path):
+        return summary
+
+    with open(log_path, newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            if row.get("date") != on_date:
+                continue
+            try:
+                travellers = int(row["total_travellers"])
+                cents = int(row["total_cents"])
+            except (KeyError, TypeError, ValueError):
+                summary["skipped"] += 1
+                continue
+
+            summary["vouchers"] += 1
+            summary["travellers"] += travellers
+            summary["total_cents"] += cents
+            method = row.get("payment_method") or "UNKNOWN"
+            summary["by_payment"][method] = (
+                summary["by_payment"].get(method, 0) + 1
+            )
+
+    return summary
 
 
 # ===========================================================================
@@ -269,6 +697,8 @@ class CTATicketingApp(tk.Tk):
                 "student": 0,
             },
             "payment_method":   None,   # "card" | "cash" | "paypal"
+            "issue_time":       None,   # datetime, fixed on payment
+            "reference":        None,   # unique voucher reference
         }
 
         # Container – all frames are stacked here
@@ -290,7 +720,141 @@ class CTATicketingApp(tk.Tk):
             self.frames[FrameClass.__name__] = frame
             frame.grid(row=0, column=0, sticky="nsew")
 
+        # Defensive start-up check of the reference data (Appendix 1).
+        # If a station has been typed into the wrong zone, the operator
+        # is warned before any traveller relies on the stations board.
+        data_errors = validate_reference_data()
+        if data_errors:
+            messagebox.showerror(
+                "Station Data Error",
+                "The station reference data does not match the "
+                "Centrala Underground map:\n\n" + "\n".join(data_errors)
+            )
+
+        # [ENH-6] Keyboard shortcuts. Bound on the main window only, so
+        # Enter and Escape inside a payment dialog are not affected.
+        # Each screen decides what the key does via on_return() and
+        # on_escape(); a screen without the method ignores the key.
+        self.current_frame = None
+        self.bind("<Return>", lambda event: self._dispatch_key("on_return"))
+        self.bind("<Escape>", lambda event: self._dispatch_key("on_escape"))
+
+        # [ENH-5] Kiosk idle timeout. Any key press, click or mouse
+        # movement restarts the countdown.
+        self._idle_job = None
+        for sequence in ("<Any-KeyPress>", "<Any-ButtonPress>", "<Motion>"):
+            self.bind_all(sequence, self._restart_idle_timer, add="+")
+        self._restart_idle_timer()
+
         self.show_frame("WelcomeScreen")
+
+    # -----------------------------------------------------------------------
+    # [ENH-6] Keyboard shortcut dispatch
+    # -----------------------------------------------------------------------
+
+    def _dispatch_key(self, method_name: str):
+        """
+        Pass Enter / Escape to the screen currently on display.
+
+        Args:
+            method_name (str): "on_return" or "on_escape".
+        """
+        frame = self.frames.get(self.current_frame)
+        handler = getattr(frame, method_name, None)
+        if handler is not None:
+            handler()
+
+    # -----------------------------------------------------------------------
+    # [ENH-5] Kiosk idle timeout
+    # -----------------------------------------------------------------------
+
+    def _restart_idle_timer(self, _event=None):
+        """Cancel the pending timeout (if any) and start a new one."""
+        if self._idle_job is not None:
+            self.after_cancel(self._idle_job)
+        self._idle_job = self.after(IDLE_TIMEOUT_MS, self._on_idle_timeout)
+
+    def _payment_dialog_open(self) -> bool:
+        """
+        Return True if a payment dialog (or any pop-up window) is open.
+
+        The timeout must not reset the journey underneath an open
+        dialog, because the traveller may be part-way through paying.
+        """
+        return any(
+            isinstance(widget, tk.Toplevel)
+            for frame in self.frames.values()
+            for widget in frame.winfo_children()
+        )
+
+    def _on_idle_timeout(self):
+        """
+        Return to the stations board after a period of inactivity.
+
+        Nothing happens if the board is already showing or a dialog is
+        open; the timer simply starts again. A completed voucher has
+        already been recorded in the transaction log, so returning from
+        the voucher screen loses no data.
+        """
+        self._idle_job = None
+        if (self.current_frame == "WelcomeScreen"
+                or self._payment_dialog_open()):
+            self._restart_idle_timer()
+            return
+
+        self.reset_state()
+        self.show_frame("WelcomeScreen")
+        self._restart_idle_timer()
+
+    def complete_payment(self, method: str):
+        """
+        Record a confirmed payment and open the voucher.
+
+        Called by every payment dialog. The issue time and reference
+        are fixed HERE, once per transaction, so the on-screen voucher,
+        the printed text and the PDF all show identical values
+        (IQA October 2026, AC 4.2).
+
+        Args:
+            method (str): "card", "cash" or "paypal".
+        """
+        # Defensive check: a voucher must never be issued without both
+        # zones. (Found during automated testing: if the journey has
+        # been cleared, e.g. by the idle timeout, the payment is
+        # refused and the traveller is returned to the stations board.)
+        if not (self.state["start_zone"]
+                and self.state["destination_zone"]):
+            logger.error("Payment refused: journey zones missing.")
+            messagebox.showerror(
+                "Journey Expired",
+                "Your journey details were cleared, so no voucher was "
+                "issued. Please start again."
+            )
+            self.reset_state()
+            self.show_frame("WelcomeScreen")
+            return
+
+        issue_time = datetime.now()
+        self.state["payment_method"] = method
+        self.state["issue_time"] = issue_time
+        self.state["reference"] = generate_reference(issue_time)
+        self.show_frame("VoucherScreen")
+
+        # [ENH-3] Record the voucher in the transaction log. A failure
+        # here (for example the CSV is open in Excel and locked) must
+        # not stop the traveller getting their voucher, so the error is
+        # logged and shown as a warning instead.
+        details = self.frames["VoucherScreen"].transaction_details()
+        try:
+            record_transaction(details)
+        except OSError as exc:
+            logger.error("Could not write transaction %s: %s",
+                         details["reference"], exc)
+            messagebox.showwarning(
+                "Transaction Log",
+                "Your voucher is valid, but it could not be saved to "
+                "the transaction log. Please tell a member of staff."
+            )
 
     def show_frame(self, frame_name: str):
         """
@@ -300,17 +864,41 @@ class CTATicketingApp(tk.Tk):
             frame_name (str): Key in self.frames dict (class name).
         """
         frame = self.frames[frame_name]
+        self.current_frame = frame_name   # [ENH-5] / [ENH-6]
         if hasattr(frame, "on_show"):
             frame.on_show()
         frame.tkraise()
 
     def reset_state(self):
-        """Reset all shared journey state for a new ticket purchase."""
-        self.state["start_zone"]       = None
+        """
+        Reset everything for a new ticket purchase.
+
+        Two things are reset (IQA October 2026, AC 3.1 / 4.2):
+          1. The shared state dictionary (zones, travellers, payment,
+             issue time and reference).
+          2. The INPUT VARIABLES held by each screen: the zone radio
+             buttons and the traveller entry fields.
+
+        Version 3.5 reset only (1). The radio buttons and entry fields
+        kept their old values, and pressing Continue copied them back
+        into the state, so the previous journey leaked into the next
+        transaction. Each screen now exposes reset_inputs(), and this
+        method calls it on every screen that has one.
+        """
+        self.state["start_zone"] = None
         self.state["destination_zone"] = None
-        self.state["payment_method"]   = None
-        for key in self.state["travellers"]:
-            self.state["travellers"][key] = 0
+        self.state["payment_method"] = None
+        self.state["issue_time"] = None
+        self.state["reference"] = None
+        # A new dictionary is assigned rather than editing the old one,
+        # so no screen can still hold a reference to the old counts.
+        self.state["travellers"] = {
+            t_type["key"]: 0 for t_type in TRAVELLER_TYPES
+        }
+
+        for frame in self.frames.values():
+            if hasattr(frame, "reset_inputs"):
+                frame.reset_inputs()
 
 
 # ===========================================================================
@@ -368,9 +956,12 @@ class WelcomeScreen(tk.Frame):
         )
         table_frame.pack(padx=30, pady=6, fill="both", expand=True)
 
-        # Column names derived from zone names and descriptions
+        # Column names derived from zone names, with the station count
+        # shown so the traveller (and the tester) can see at a glance
+        # that the board matches Appendix 1 (10 / 12 / 14).
         columns = [
-            f"Zone {z} \u2013 {ZONES[z]['name']}"
+            f"Zone {z} \u2013 {ZONES[z]['name']} "
+            f"({len(ZONES[z]['stations'])})"
             for z in sorted(ZONES.keys())
         ]
 
@@ -408,13 +999,16 @@ class WelcomeScreen(tk.Frame):
             tree.heading(col, text=col)
             tree.column(col, width=col_width, anchor="center")
 
+        # sorted() guarantees the alphabetical order Appendix 2 asks for,
+        # even if the ZONES lists are edited later.
+        board = {z: sorted(ZONES[z]["stations"]) for z in ZONES}
+
         # Pad shorter zone station lists with empty strings
-        max_rows = max(len(ZONES[z]["stations"]) for z in ZONES)
+        max_rows = max(len(stations) for stations in board.values())
         for row_idx in range(max_rows):
             row_data = [
-                (ZONES[z]["stations"][row_idx]
-                 if row_idx < len(ZONES[z]["stations"]) else "")
-                for z in sorted(ZONES.keys())
+                (board[z][row_idx] if row_idx < len(board[z]) else "")
+                for z in sorted(board.keys())
             ]
             tag = "even" if row_idx % 2 == 0 else "odd"
             tree.insert("", "end", values=row_data, tags=(tag,))
@@ -448,9 +1042,66 @@ class WelcomeScreen(tk.Frame):
 
         tk.Label(
             footer,
-            text="Select your journey zones on the next screen",
+            text="Select your journey zones on the next screen  "
+                 "(or press Enter)",
             font=FONT_SMALL, bg=COLOUR_BG, fg=COLOUR_LIGHT
         ).pack(pady=2)
+
+        # [ENH-4] Small, low-contrast staff button in the corner, so
+        # travellers are not distracted by it. place() positions it
+        # without changing the layout of the main button above.
+        tk.Button(
+            footer, text="Staff: today's sales",
+            font=FONT_SMALL, bg=COLOUR_BG, fg=COLOUR_LIGHT,
+            relief="flat", cursor="hand2",
+            command=self._show_sales_summary
+        ).place(relx=1.0, rely=1.0, anchor="se", x=-10)
+
+    def on_return(self):
+        """[ENH-6] Enter on the stations board starts a purchase."""
+        self.controller.show_frame("ZoneSelectionScreen")
+
+    def _show_sales_summary(self):
+        """
+        [ENH-4] Show today's totals from the transaction log.
+
+        Reads the CSV each time, so the figures include every voucher
+        issued today, even in earlier sessions of the program.
+        """
+        try:
+            summary = summarise_sales()
+        except OSError as exc:
+            logger.error("Could not read transaction log: %s", exc)
+            messagebox.showerror(
+                "Sales Summary", f"The transaction log could not be "
+                f"read:\n{exc}"
+            )
+            return
+
+        if summary["vouchers"] == 0:
+            messagebox.showinfo(
+                "Sales Summary",
+                f"No vouchers have been issued today ({summary['date']})."
+            )
+            return
+
+        methods = "\n".join(
+            f"    {method.title():<8} {count} voucher(s)"
+            for method, count in sorted(summary["by_payment"].items())
+        )
+        text = (
+            f"Date:        {summary['date']}\n"
+            f"Vouchers:    {summary['vouchers']}\n"
+            f"Travellers:  {summary['travellers']}\n"
+            f"Takings:     {cents_to_display(summary['total_cents'])}\n\n"
+            f"By payment method:\n{methods}"
+        )
+        if summary["skipped"]:
+            text += (
+                f"\n\n{summary['skipped']} unreadable row(s) were "
+                f"skipped. Check the log file."
+            )
+        messagebox.showinfo("Sales Summary", text)
 
 
 # ===========================================================================
@@ -467,10 +1118,167 @@ class ZoneSelectionScreen(tk.Frame):
 
     def __init__(self, parent, controller):
         super().__init__(parent, bg=COLOUR_BG)
-        self.controller      = controller
-        self.start_var       = tk.IntVar(value=0)
-        self.destination_var = tk.IntVar(value=0)
+        self.controller = controller
+        self.start_var = tk.IntVar(value=0)   # 0 = not selected
+        self.destination_var = tk.IntVar(value=0)   # 0 = not selected
         self._build_ui()
+
+    def reset_inputs(self):
+        """
+        Clear both zone selections for a new ticket.
+
+        Called by CTATicketingApp.reset_state(). Setting the variables
+        back to 0 deselects every radio button, so the traveller must
+        choose the zones again (IQA October 2026, AC 3.1).
+        """
+        self.start_var.set(0)
+        self.destination_var.set(0)
+        self._update_info()
+        # [ENH-1] Clear the station finder as well
+        self.finder_var.set("")
+        self._found_zone = None
+        self.finder_result.config(text="", fg=COLOUR_LIGHT)
+        self._set_finder_buttons("disabled")
+
+    # -----------------------------------------------------------------------
+    # [ENH-6] Keyboard shortcuts
+    # -----------------------------------------------------------------------
+
+    def on_return(self):
+        """
+        Enter = Continue, except while typing in the station finder,
+        where Enter runs the search instead.
+        """
+        if self.focus_get() is self.finder_entry:
+            self._find_station()
+        else:
+            self._on_continue()
+
+    def on_escape(self):
+        """Escape = Back to the stations board."""
+        self.controller.show_frame("WelcomeScreen")
+
+    # -----------------------------------------------------------------------
+    # [ENH-1] Station finder
+    # -----------------------------------------------------------------------
+
+    def _build_station_finder(self):
+        """
+        Build the 'Find your station' bar.
+
+        The brief requires travellers to choose a ZONE, not a station,
+        and the zone menus below still work exactly as specified. The
+        finder is an aid for travellers who know only their station
+        name: it tells them the zone and can tick the zone for them.
+        """
+        bar = tk.Frame(self, bg=COLOUR_PANEL, padx=12, pady=6)
+        bar.pack(padx=40, fill="x", pady=(0, 8))
+
+        tk.Label(
+            bar, text="\U0001f50d  Don't know your zone? Find your station:",
+            font=FONT_SMALL, bg=COLOUR_PANEL, fg=COLOUR_WHITE
+        ).pack(side="left")
+
+        self.finder_var = tk.StringVar()
+        self.finder_entry = tk.Entry(
+            bar, textvariable=self.finder_var, width=14,
+            font=FONT_BODY, bg=COLOUR_INPUT_BG, fg=COLOUR_WHITE,
+            insertbackground=COLOUR_WHITE, relief="flat"
+        )
+        self.finder_entry.pack(side="left", padx=6)
+
+        tk.Button(
+            bar, text="Find", font=FONT_SMALL,
+            bg=COLOUR_BTN, fg=COLOUR_BTN_TEXT, relief="flat",
+            cursor="hand2", command=self._find_station
+        ).pack(side="left")
+
+        # The two "use" buttons stay disabled until a station is found,
+        # so they can never select a zone from an unknown name.
+        self.use_dest_btn = tk.Button(
+            bar, text="Set as destination", font=FONT_SMALL,
+            bg=COLOUR_BG, fg=COLOUR_WHITE, relief="flat",
+            state="disabled", cursor="hand2",
+            command=lambda: self._use_found_zone(self.destination_var)
+        )
+        self.use_dest_btn.pack(side="right", padx=(4, 0))
+
+        self.use_start_btn = tk.Button(
+            bar, text="Set as boarding", font=FONT_SMALL,
+            bg=COLOUR_BG, fg=COLOUR_WHITE, relief="flat",
+            state="disabled", cursor="hand2",
+            command=lambda: self._use_found_zone(self.start_var)
+        )
+        self.use_start_btn.pack(side="right", padx=4)
+
+        self.finder_result = tk.Label(
+            self, text="", font=FONT_SMALL,
+            bg=COLOUR_BG, fg=COLOUR_LIGHT
+        )
+        self.finder_result.pack()
+
+        self._found_zone = None   # Zone number of the last match
+
+    def _set_finder_buttons(self, state: str):
+        """Enable or disable both 'Set as …' buttons together."""
+        self.use_start_btn.config(state=state)
+        self.use_dest_btn.config(state=state)
+
+    def _find_station(self):
+        """
+        Search for the typed station and report its zone.
+
+        Three outcomes:
+          - exact match   : show the zone and enable the 'Set as' buttons
+          - partial match : show up to five suggestions ("did you mean")
+          - no match      : explain that the name was not found
+        """
+        typed = self.finder_var.get()
+        match = find_station(typed)
+
+        if match:
+            zone_num, station = match
+            self._found_zone = zone_num
+            self.finder_result.config(
+                text=(f"{station} is in Zone {zone_num} – "
+                      f"{ZONES[zone_num]['name']}."),
+                fg=COLOUR_SUCCESS
+            )
+            self._set_finder_buttons("normal")
+            return
+
+        self._found_zone = None
+        self._set_finder_buttons("disabled")
+
+        if not typed.strip():
+            self.finder_result.config(
+                text="Type a station name, e.g. Lomil.", fg=COLOUR_LIGHT
+            )
+            return
+
+        suggestions = suggest_stations(typed)
+        if suggestions:
+            self.finder_result.config(
+                text="Did you mean: " + ", ".join(suggestions) + "?",
+                fg=COLOUR_ACCENT
+            )
+        else:
+            self.finder_result.config(
+                text=(f"No station called '{typed.strip()}'. Check the "
+                      f"stations board."),
+                fg=COLOUR_DANGER
+            )
+
+    def _use_found_zone(self, variable: tk.IntVar):
+        """
+        Tick the zone of the station found, as boarding or destination.
+
+        Args:
+            variable (tk.IntVar): start_var or destination_var.
+        """
+        if self._found_zone is not None:
+            variable.set(self._found_zone)
+            self._update_info()
 
     def _build_ui(self):
         """Construct the full zone selection UI."""
@@ -487,7 +1295,9 @@ class ZoneSelectionScreen(tk.Frame):
             ),
             font=FONT_BODY, bg=COLOUR_BG, fg=COLOUR_LIGHT,
             justify="center"
-        ).pack(pady=(0, 14))
+        ).pack(pady=(0, 6))
+
+        self._build_station_finder()      # [ENH-1]
 
         # Two-column layout
         selector_row = tk.Frame(self, bg=COLOUR_BG)
@@ -567,8 +1377,10 @@ class ZoneSelectionScreen(tk.Frame):
                 command=self._update_info
             ).pack(anchor="w", pady=4)
 
-            # Station preview under each zone option
-            station_list = ", ".join(zone["stations"])
+            # Station preview under each zone option. It reads the same
+            # ZONES data as the stations board, so both screens always
+            # show identical allocations (IQA October 2026, AC 2.2).
+            station_list = ", ".join(sorted(zone["stations"]))
             tk.Label(
                 card,
                 text=f"       Stations: {station_list}",
@@ -579,10 +1391,10 @@ class ZoneSelectionScreen(tk.Frame):
     def _update_info(self):
         """Update the dynamic zones info label on any selection."""
         start = self.start_var.get()
-        dest  = self.destination_var.get()
+        dest = self.destination_var.get()
 
         if start != 0 and dest != 0:
-            zones  = calculate_zones_travelled(start, dest)
+            zones = calculate_zones_travelled(start, dest)
             s_name = ZONES[start]["name"]
             d_name = ZONES[dest]["name"]
             self.info_label.config(
@@ -625,7 +1437,7 @@ class ZoneSelectionScreen(tk.Frame):
     def _on_continue(self):
         """Validate zone selections and navigate to traveller screen."""
         start = self.start_var.get()
-        dest  = self.destination_var.get()
+        dest = self.destination_var.get()
 
         if start == 0:
             messagebox.showwarning(
@@ -641,7 +1453,7 @@ class ZoneSelectionScreen(tk.Frame):
             )
             return
 
-        self.controller.state["start_zone"]       = start
+        self.controller.state["start_zone"] = start
         self.controller.state["destination_zone"] = dest
         self.controller.show_frame("TravellerScreen")
 
@@ -661,15 +1473,29 @@ class TravellerScreen(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent, bg=COLOUR_BG)
         self.controller = controller
-        self.inputs     = {}   # StringVars keyed by traveller type
+        self.inputs = {}   # StringVars keyed by traveller type
         self._build_ui()
+
+    def reset_inputs(self):
+        """
+        Set every traveller entry field back to "0" for a new ticket.
+
+        Called by CTATicketingApp.reset_state(). Without this the
+        previous counts stayed in the fields and were submitted again
+        with the next ticket (IQA October 2026, AC 3.1 / TC20).
+        """
+        for var in self.inputs.values():
+            var.set("0")
+        self.journey_label.config(text="")
+        self.live_total_label.config(text="")     # [ENH-2]
 
     def on_show(self):
         """Refresh the journey summary when this screen is revisited."""
         state = self.controller.state
+        self._update_live_total()                 # [ENH-2]
         if state["start_zone"] and state["destination_zone"]:
-            s     = ZONES[state["start_zone"]]["name"]
-            d     = ZONES[state["destination_zone"]]["name"]
+            s = ZONES[state["start_zone"]]["name"]
+            d = ZONES[state["destination_zone"]]["name"]
             zones = calculate_zones_travelled(
                 state["start_zone"], state["destination_zone"]
             )
@@ -702,7 +1528,8 @@ class TravellerScreen(tk.Frame):
             self,
             text=(
                 "Enter 0 if there are no travellers of a particular "
-                "type.\nAt least one traveller must be entered."
+                "type.\nAt least one traveller must be entered "
+                f"(maximum {MAX_TRAVELLERS_PER_TYPE} per type)."
             ),
             font=FONT_BODY, bg=COLOUR_BG, fg=COLOUR_LIGHT,
             justify="center"
@@ -725,9 +1552,9 @@ class TravellerScreen(tk.Frame):
             parent : Parent frame to pack into.
             t_type : Dict with 'key', 'label', 'fare' keys.
         """
-        key   = t_type["key"]
+        key = t_type["key"]
         label = t_type["label"]
-        fare  = t_type["fare"]
+        fare = t_type["fare"]
 
         var = tk.StringVar(value="0")
         self.inputs[key] = var
@@ -748,7 +1575,7 @@ class TravellerScreen(tk.Frame):
 
         tk.Label(
             left,
-            text=f"Rate: {pence_to_display(fare)} per zone",
+            text=f"Rate: {cents_to_display(fare)} per zone",
             font=FONT_SMALL, bg=COLOUR_PANEL, fg=COLOUR_LIGHT
         ).pack(anchor="w")
 
@@ -784,7 +1611,8 @@ class TravellerScreen(tk.Frame):
         """
         Increment or decrement a traveller count by 'delta'.
 
-        Clamps minimum value at 0 to prevent negative counts.
+        Clamps the value between 0 and MAX_TRAVELLERS_PER_TYPE so the
+        stepper buttons can never produce an invalid count.
 
         Args:
             var   (tk.StringVar): Variable bound to the entry field.
@@ -794,7 +1622,8 @@ class TravellerScreen(tk.Frame):
         if not current.isdigit():
             var.set("0")
             return
-        var.set(str(max(0, int(current) + delta)))
+        new_value = int(current) + delta
+        var.set(str(min(MAX_TRAVELLERS_PER_TYPE, max(0, new_value))))
 
     def _build_rate_table(self):
         """Build a compact fare rate reference summary."""
@@ -807,13 +1636,75 @@ class TravellerScreen(tk.Frame):
         ).pack(anchor="w")
 
         rates_text = "  |  ".join(
-            f"{t['label']}: {pence_to_display(t['fare'])}/zone"
+            f"{t['label']}: {cents_to_display(t['fare'])}/zone"
             for t in TRAVELLER_TYPES
         )
         tk.Label(
             frame, text=rates_text,
             font=FONT_SMALL, bg=COLOUR_BG, fg=COLOUR_LIGHT
         ).pack(anchor="w")
+
+        # [ENH-2] Live fare preview, updated on every change to a count
+        self.live_total_label = tk.Label(
+            frame, text="", font=FONT_SUBHEADING,
+            bg=COLOUR_BG, fg=COLOUR_WHITE
+        )
+        self.live_total_label.pack(anchor="w", pady=(6, 0))
+
+        # trace_add("write") calls the function whenever a value changes,
+        # whether by typing or by the +/- buttons.
+        for var in self.inputs.values():
+            var.trace_add("write", lambda *_args: self._update_live_total())
+
+    def _update_live_total(self):
+        """
+        [ENH-2] Recalculate and show the running total.
+
+        Uses build_fare_breakdown(), the same function as the payment
+        screen and the voucher, so the preview always matches the
+        amount charged. While any field holds an invalid value the
+        preview explains that instead of showing a wrong figure.
+        """
+        state = self.controller.state
+        if not (state["start_zone"] and state["destination_zone"]):
+            self.live_total_label.config(text="")
+            return
+
+        counts = {}
+        for key, var in self.inputs.items():
+            valid, value, _error = validate_positive_integer(var.get(), key)
+            if not valid:
+                self.live_total_label.config(
+                    text="Running total: enter whole numbers from 0 to "
+                         f"{MAX_TRAVELLERS_PER_TYPE} to see the fare.",
+                    fg=COLOUR_DANGER
+                )
+                return
+            counts[key] = value
+
+        zones = calculate_zones_travelled(
+            state["start_zone"], state["destination_zone"]
+        )
+        breakdown = build_fare_breakdown(counts, zones)
+        total = cents_to_display(breakdown["total_cents"])
+        pax = breakdown["total_pax"]
+        self.live_total_label.config(
+            text=(f"Running total: {total}  for {pax} "
+                  f"traveller{'' if pax == 1 else 's'}"),
+            fg=COLOUR_ACCENT if breakdown["total_pax"] else COLOUR_LIGHT
+        )
+
+    # -----------------------------------------------------------------------
+    # [ENH-6] Keyboard shortcuts
+    # -----------------------------------------------------------------------
+
+    def on_return(self):
+        """Enter = Proceed to Payment (the same validation applies)."""
+        self._on_continue()
+
+    def on_escape(self):
+        """Escape = Back to zone selection."""
+        self.controller.show_frame("ZoneSelectionScreen")
 
     def _add_nav_buttons(self):
         """Add Back and Proceed to Payment buttons."""
@@ -846,12 +1737,12 @@ class TravellerScreen(tk.Frame):
           2. Total traveller count must be at least 1.
         """
         counts = {}
-        total  = 0
+        total = 0
 
         for t_type in TRAVELLER_TYPES:
-            key   = t_type["key"]
+            key = t_type["key"]
             label = t_type["label"]
-            raw   = self.inputs[key].get()
+            raw = self.inputs[key].get()
 
             valid, value, error = validate_positive_integer(raw, label)
             if not valid:
@@ -880,6 +1771,10 @@ class PaymentScreen(tk.Frame):
     """
     Screen 4 – Payment Method Selection.
 
+    OPTIONAL EXTENSION: payment is not required by the client brief.
+    All three methods are simulations; no money is taken and no card,
+    cash or account details are stored or sent anywhere.
+
     Presents three payment options as large clickable tiles:
       - Card   : Card-reader simulation dialog
       - Cash   : Cash-insertion simulation dialog (with change calc)
@@ -888,9 +1783,18 @@ class PaymentScreen(tk.Frame):
 
     def __init__(self, parent, controller):
         super().__init__(parent, bg=COLOUR_BG)
-        self.controller   = controller
-        self._total_pence = 0
+        self.controller = controller
+        self._total_cents = 0
         self._build_ui()
+
+    def on_escape(self):
+        """
+        [ENH-6] Escape = Back to the traveller screen.
+
+        There is deliberately no Enter shortcut here: the traveller must
+        actively choose a payment method rather than pay by accident.
+        """
+        self.controller.show_frame("TravellerScreen")
 
     def on_show(self):
         """Recompute and display the fare total each time screen appears."""
@@ -900,26 +1804,25 @@ class PaymentScreen(tk.Frame):
         """Compute and display the current journey grand total."""
         state = self.controller.state
         start = state["start_zone"]
-        dest  = state["destination_zone"]
+        dest = state["destination_zone"]
         travs = state["travellers"]
 
         if not start or not dest:
             return
 
-        zones       = calculate_zones_travelled(start, dest)
-        total_pence = sum(
-            calculate_fare(t["fare"], zones, travs.get(t["key"], 0))
-            for t in TRAVELLER_TYPES
-        )
+        zones = calculate_zones_travelled(start, dest)
+        # Same function as the voucher, so the amount charged here is
+        # always the amount printed on the voucher.
+        total_cents = build_fare_breakdown(travs, zones)["total_cents"]
 
         self.total_label.config(
             text=(
-                f"Journey Total:  {pence_to_display(total_pence)}"
+                f"Journey Total:  {cents_to_display(total_cents)}"
                 f"   ({zones} zone"
                 f"{'s' if zones > 1 else ''} travelled)"
             )
         )
-        self._total_pence = total_pence
+        self._total_cents = total_cents
 
     def _build_ui(self):
         """Construct the payment screen layout."""
@@ -964,7 +1867,7 @@ class PaymentScreen(tk.Frame):
             parent=btn_row,
             icon="\U0001f4b5",
             label="Pay with Cash",
-            sub="Insert coins and notes",
+            sub="Insert cash (amounts in cents)",
             bg_col=COLOUR_CASH,
             border_col="#0F5C30",
             command=self._open_cash_dialog
@@ -1042,15 +1945,15 @@ class PaymentScreen(tk.Frame):
 
     def _open_card_dialog(self):
         """Open the card payment simulation dialog."""
-        CardPaymentDialog(self, self.controller, self._total_pence)
+        CardPaymentDialog(self, self.controller, self._total_cents)
 
     def _open_cash_dialog(self):
         """Open the cash insertion simulation dialog."""
-        CashPaymentDialog(self, self.controller, self._total_pence)
+        CashPaymentDialog(self, self.controller, self._total_cents)
 
     def _open_paypal_dialog(self):
         """Open the PayPal payment simulation dialog."""
-        PayPalPaymentDialog(self, self.controller, self._total_pence)
+        PayPalPaymentDialog(self, self.controller, self._total_cents)
 
 
 # ===========================================================================
@@ -1065,10 +1968,10 @@ class CardPaymentDialog(tk.Toplevel):
     before confirming payment and navigating to the receipt screen.
     """
 
-    def __init__(self, parent, controller, total_pence: int):
+    def __init__(self, parent, controller, total_cents: int):
         super().__init__(parent)
-        self.controller  = controller
-        self.total_pence = total_pence
+        self.controller = controller
+        self.total_cents = total_cents
 
         self.title("Card Payment \u2013 CTA Ticketing")
         self.geometry("440x500")
@@ -1088,7 +1991,7 @@ class CardPaymentDialog(tk.Toplevel):
 
         tk.Label(
             self,
-            text=f"Amount Due:  {pence_to_display(self.total_pence)}",
+            text=f"Amount Due:  {cents_to_display(self.total_cents)}",
             font=("Georgia", 18, "bold"),
             bg=COLOUR_BG, fg=COLOUR_ACCENT
         ).pack(pady=(22, 6))
@@ -1177,13 +2080,14 @@ class CardPaymentDialog(tk.Toplevel):
                 text="\u2705  Payment approved!",
                 fg=COLOUR_SUCCESS
             )
-            self.controller.state["payment_method"] = "card"
-            self.after(15000, self._go_to_voucher)
+            # 1.5 s pause so the "approved" message can be read.
+            # (v3.5 used 15000 ms by mistake, a 15-second wait.)
+            self.after(1500, self._go_to_voucher)
 
     def _go_to_voucher(self):
-        """Close dialog and navigate to the receipt screen."""
+        """Close the dialog and record the payment as 'card'."""
         self.destroy()
-        self.controller.show_frame("VoucherScreen")
+        self.controller.complete_payment("card")
 
 
 # ===========================================================================
@@ -1194,24 +2098,30 @@ class CashPaymentDialog(tk.Toplevel):
     """
     Modal dialog simulating a cash-insertion vending terminal.
 
-    Denomination buttons let the user click to insert coins/notes.
+    NOTE: Cash payment is an implementation EXTENSION beyond the client's
+    minimum brief. It does not reinterpret the fare specification: every
+    amount inserted, remaining and returned as change is an integer number
+    of CENTS, the unit stated in Appendix 2. The denomination values below
+    are neutral cent amounts and do not represent any national currency.
+
+    Denomination buttons let the user click to insert cash in cents.
     A live Inserted / Remaining display updates on each click.
     The Confirm button enables once the inserted total covers the fare.
     """
 
+    # Neutral cent denominations (implementation extension – see above)
     DENOMINATIONS = [
-        ("1p",    1),   ("2p",    2),   ("5p",    5),   ("10p",  10),
-        ("20p",  20),   ("50p",  50),
-        ("\u00a31",  100),  ("\u00a32",  200),
-        ("\u00a35",  500),  ("\u00a310", 1000),
-        ("\u00a320", 2000), ("\u00a350", 5000),
+        ("5",      5),    ("10",     10),   ("25",     25),
+        ("50",     50),   ("100",    100),  ("500",    500),
+        ("1000",   1000), ("2000",   2000), ("5000",   5000),
+        ("10000",  10000),
     ]
 
-    def __init__(self, parent, controller, total_pence: int):
+    def __init__(self, parent, controller, total_cents: int):
         super().__init__(parent)
-        self.controller  = controller
-        self.total_pence = total_pence
-        self._inserted   = 0
+        self.controller = controller
+        self.total_cents = total_cents
+        self._inserted = 0
 
         self.title("Cash Payment \u2013 CTA Ticketing")
         self.geometry("520x580")
@@ -1231,7 +2141,7 @@ class CashPaymentDialog(tk.Toplevel):
 
         tk.Label(
             self,
-            text=f"Amount Due:  {pence_to_display(self.total_pence)}",
+            text=f"Amount Due:  {cents_to_display(self.total_cents)}",
             font=("Georgia", 17, "bold"),
             bg=COLOUR_BG, fg=COLOUR_ACCENT
         ).pack(pady=(14, 4))
@@ -1242,14 +2152,14 @@ class CashPaymentDialog(tk.Toplevel):
 
         self.inserted_label = tk.Label(
             info_frame,
-            text=f"Inserted: {pence_to_display(self._inserted)}",
+            text=f"Inserted: {cents_to_display(self._inserted)}",
             font=FONT_SUBHEADING, bg=COLOUR_PANEL, fg=COLOUR_WHITE
         )
         self.inserted_label.pack(side="left", expand=True)
 
         self.remaining_label = tk.Label(
             info_frame,
-            text=f"Remaining: {pence_to_display(self.total_pence)}",
+            text=f"Remaining: {cents_to_display(self.total_cents)}",
             font=FONT_SUBHEADING, bg=COLOUR_PANEL, fg=COLOUR_DANGER
         )
         self.remaining_label.pack(side="right", expand=True)
@@ -1278,7 +2188,7 @@ class CashPaymentDialog(tk.Toplevel):
         )
 
         tk.Label(
-            self, text="Tap denominations to insert:",
+            self, text="Tap a denomination (in cents) to insert:",
             font=FONT_BODY, bg=COLOUR_BG, fg=COLOUR_LIGHT
         ).pack(pady=(4, 2))
 
@@ -1289,15 +2199,15 @@ class CashPaymentDialog(tk.Toplevel):
         for idx, (label, value) in enumerate(self.DENOMINATIONS):
             tk.Button(
                 denom_frame, text=label,
-                font=FONT_SUBHEADING, width=5,
+                font=FONT_SUBHEADING, width=6,
                 bg=COLOUR_CASH, fg=COLOUR_WHITE,
                 relief="flat", cursor="hand2",
                 command=lambda v=value: self._insert(v)
-            ).grid(row=idx // 6, column=idx % 6, padx=4, pady=4)
+            ).grid(row=idx // 5, column=idx % 5, padx=4, pady=4)
 
         self.status_label = tk.Label(
             self,
-            text="Insert cash using the buttons above.",
+            text="Insert cash (in cents) using the buttons above.",
             font=FONT_BODY, bg=COLOUR_BG, fg=COLOUR_LIGHT,
             wraplength=420
         )
@@ -1324,49 +2234,48 @@ class CashPaymentDialog(tk.Toplevel):
             command=self.destroy
         ).pack(side="left", padx=8)
 
-    def _insert(self, value_pence: int):
+    def _insert(self, value_cents: int):
         """
         Add a denomination to the running inserted total.
 
         Args:
-            value_pence (int): Denomination value in pence.
+            value_cents (int): Denomination value in cents.
         """
-        self._inserted += value_pence
-        remaining = self.total_pence - self._inserted
+        self._inserted += value_cents
+        remaining = self.total_cents - self._inserted
 
         self.inserted_label.config(
-            text=f"Inserted: {pence_to_display(self._inserted)}"
+            text=f"Inserted: {cents_to_display(self._inserted)}"
         )
 
         if remaining <= 0:
             change = abs(remaining)
             self.remaining_label.config(
-                text=f"Change: {pence_to_display(change)}",
+                text=f"Change: {cents_to_display(change)}",
                 fg=COLOUR_SUCCESS
             )
             self.status_label.config(
                 text=(
                     f"\u2705  Covered!  "
-                    f"Change due: {pence_to_display(change)}"
+                    f"Change due: {cents_to_display(change)}"
                 ),
                 fg=COLOUR_SUCCESS
             )
             self.confirm_btn.config(state="normal")
         else:
             self.remaining_label.config(
-                text=f"Remaining: {pence_to_display(remaining)}",
+                text=f"Remaining: {cents_to_display(remaining)}",
                 fg=COLOUR_DANGER
             )
             self.status_label.config(
-                text=f"Still required: {pence_to_display(remaining)}",
+                text=f"Still required: {cents_to_display(remaining)}",
                 fg=COLOUR_LIGHT
             )
 
     def _confirm_payment(self):
-        """Confirm cash payment and navigate to receipt screen."""
-        self.controller.state["payment_method"] = "cash"
+        """Close the dialog and record the payment as 'cash'."""
         self.destroy()
-        self.controller.show_frame("VoucherScreen")
+        self.controller.complete_payment("cash")
 
 
 # ===========================================================================
@@ -1377,14 +2286,18 @@ class PayPalPaymentDialog(tk.Toplevel):
     """
     Modal dialog simulating a PayPal secure-checkout flow.
 
-    Renders a PayPal-branded login form. After clicking 'Log In & Pay',
+    Renders a PayPal-style login form. After clicking 'Log In & Pay',
     a progress animation confirms the transaction.
+
+    SIMULATION ONLY: the email and password fields are placeholders.
+    Nothing typed into them is validated, stored or transmitted, and
+    the dialog tells the user not to enter real details.
     """
 
-    def __init__(self, parent, controller, total_pence: int):
+    def __init__(self, parent, controller, total_cents: int):
         super().__init__(parent)
-        self.controller  = controller
-        self.total_pence = total_pence
+        self.controller = controller
+        self.total_cents = total_cents
 
         self.title("PayPal \u2013 Secure Checkout")
         self.geometry("420x560")
@@ -1419,7 +2332,7 @@ class PayPalPaymentDialog(tk.Toplevel):
         ).pack()
         tk.Label(
             amt,
-            text=f"Amount:  {pence_to_display(self.total_pence)}",
+            text=f"Amount:  {cents_to_display(self.total_cents)}",
             font=("Arial", 16, "bold"),
             bg="#F5F5F5", fg=COLOUR_PAYPAL
         ).pack(pady=4)
@@ -1488,7 +2401,7 @@ class PayPalPaymentDialog(tk.Toplevel):
 
         tk.Label(
             self,
-            text="\U0001f512  Secured by TLS encryption",
+            text="Simulation only – do not enter real account details.",
             font=("Arial", 8), bg=COLOUR_WHITE, fg="#AAAAAA"
         ).pack(pady=10)
 
@@ -1511,13 +2424,12 @@ class PayPalPaymentDialog(tk.Toplevel):
                 text="\u2705  Payment successful!",
                 fg=COLOUR_SUCCESS
             )
-            self.controller.state["payment_method"] = "paypal"
             self.after(800, self._go_to_voucher)
 
     def _go_to_voucher(self):
-        """Close dialog and navigate to the receipt screen."""
+        """Close the dialog and record the payment as 'paypal'."""
         self.destroy()
-        self.controller.show_frame("VoucherScreen")
+        self.controller.complete_payment("paypal")
 
 
 # ===========================================================================
@@ -1538,9 +2450,9 @@ class VoucherScreen(tk.Frame):
 
     def __init__(self, parent, controller):
         super().__init__(parent, bg=COLOUR_BG)
-        self.controller    = controller
+        self.controller = controller
         self._voucher_text = ""      # Cached text for print / PDF
-        self._last_pdf     = None    # Path to last generated PDF file
+        self._last_pdf = None    # Path to last generated PDF file
         self._build_static_layout()
 
     def _build_static_layout(self):
@@ -1618,8 +2530,12 @@ class VoucherScreen(tk.Frame):
         """
         Called each time this frame is raised.
 
-        Regenerates the voucher text so the timestamp is always current.
+        Builds the voucher from the transaction recorded by
+        CTATicketingApp.complete_payment(). The issue time and reference
+        are read from the state, not generated here, so they stay the
+        same however many times the voucher is viewed, printed or saved.
         """
+        self._last_pdf = None    # A new transaction needs a new PDF
         self._generate_voucher_text()
         self._display_voucher_text()
 
@@ -1627,27 +2543,66 @@ class VoucherScreen(tk.Frame):
     # Voucher text generation
     # -----------------------------------------------------------------------
 
+    def transaction_details(self) -> dict:
+        """
+        Collect everything the voucher and the PDF need in one place.
+
+        Returns:
+            dict: start/destination zone numbers and names, zones
+                  travelled, the fare breakdown from
+                  build_fare_breakdown(), payment method, issue time
+                  and reference.
+        """
+        state = self.controller.state
+        start_z = state["start_zone"]
+        dest_z = state["destination_zone"]
+        zones = calculate_zones_travelled(start_z, dest_z)
+
+        # Fallbacks only apply if the voucher is opened without going
+        # through a payment dialog; normal use always sets these.
+        issue_time = state.get("issue_time") or datetime.now()
+        reference = state.get("reference") or generate_reference(
+            issue_time
+        )
+        state["issue_time"] = issue_time
+        state["reference"] = reference
+
+        return {
+            "start_z":    start_z,
+            "dest_z":     dest_z,
+            "start_name": ZONES[start_z]["name"],
+            "dest_name":  ZONES[dest_z]["name"],
+            "zones":      zones,
+            "breakdown":  build_fare_breakdown(state["travellers"], zones),
+            # "or" guards against a None value, which .get() would
+            # return as-is and which has no .upper() method.
+            "payment":    (state.get("payment_method") or "unknown").upper(),
+            "issue_time": issue_time,
+            "reference":  reference,
+        }
+
     def _generate_voucher_text(self):
         """
-        Compute all fares and build the formatted receipt string.
+        Build the formatted voucher text from the transaction details.
 
-        Caches the result in self._voucher_text for reuse by the
-        print and PDF functions.
+        All four traveller categories are listed, including any with a
+        count of 0, as Appendix 2 requires (IQA October 2026, AC 3.1).
+        The result is cached in self._voucher_text for printing and for
+        the PDF preview window.
         """
-        state      = self.controller.state
-        start_z    = state["start_zone"]
-        dest_z     = state["destination_zone"]
-        travellers = state["travellers"]
-        payment    = state.get("payment_method", "unknown").upper()
-
-        issue_time  = datetime.now()
-        zones_count = calculate_zones_travelled(start_z, dest_z)
-        start_name  = ZONES[start_z]["name"]
-        dest_name   = ZONES[dest_z]["name"]
+        details = self.transaction_details()
+        start_z = details["start_z"]
+        dest_z = details["dest_z"]
+        start_name = details["start_name"]
+        dest_name = details["dest_name"]
+        zones_count = details["zones"]
+        breakdown = details["breakdown"]
+        payment = details["payment"]
+        issue_time = details["issue_time"]
 
         width = 60
-        line  = "=" * width
-        thin  = "-" * width
+        line = "=" * width
+        thin = "-" * width
 
         def centre(text: str) -> str:
             return text.center(width)
@@ -1659,8 +2614,7 @@ class VoucherScreen(tk.Frame):
             line,
             f"  Issued  : {issue_time.strftime('%A, %d %B %Y')}",
             f"  Time    : {issue_time.strftime('%H:%M:%S')}",
-            f"  Ref     : CTA-"
-            f"{issue_time.strftime('%Y%m%d-%H%M%S')}",
+            f"  Ref     : {details['reference']}",
             thin,
             f"  Boarding    : {start_name} Zone (Zone {start_z})",
             f"  Destination : {dest_name} Zone (Zone {dest_z})",
@@ -1669,35 +2623,26 @@ class VoucherScreen(tk.Frame):
             thin,
             centre("FARE BREAKDOWN"),
             thin,
-            f"  {'Category':<12} {'Qty':>4}  "
-            f"{'Rate/Zone':>10}  {'Zones':>5}  {'Total':>9}",
+            f"  {'Category':<10} {'Qty':>4}  "
+            f"{'Rate/Zone':>11}  {'Zones':>5}  {'Total':>13}",
             thin,
         ]
 
-        grand_pence = 0
-        grand_pax   = 0
-
-        for t in TRAVELLER_TYPES:
-            count = travellers.get(t["key"], 0)
-            if count == 0:
-                continue
-
-            total_p     = calculate_fare(t["fare"], zones_count, count)
-            grand_pence += total_p
-            grand_pax   += count
-
+        # One row per category, ALWAYS including zero-count categories.
+        # (v3.5 skipped them with "if count == 0: continue".)
+        for row in breakdown["rows"]:
             lines.append(
-                f"  {t['label']:<12} {count:>4}  "
-                f"{pence_to_display(t['fare']):>10}  "
-                f"{zones_count:>5}  "
-                f"{pence_to_display(total_p):>9}"
+                f"  {row['label']:<10} {row['count']:>4}  "
+                f"{cents_to_display(row['rate']):>11}  "
+                f"{row['zones']:>5}  "
+                f"{cents_to_display(row['total']):>13}"
             )
 
         lines += [
             thin,
-            f"  {'TOTAL TRAVELLERS':<28} {grand_pax:>4}",
+            f"  {'TOTAL TRAVELLERS':<28} {breakdown['total_pax']:>13}",
             f"  {'AMOUNT PAID':<28} "
-            f"{pence_to_display(grand_pence):>10}",
+            f"{cents_to_display(breakdown['total_cents']):>13}",
             thin,
             f"  Payment Method : {payment}",
             line,
@@ -1729,14 +2674,15 @@ class VoucherScreen(tk.Frame):
         if not REPORTLAB_AVAILABLE:
             return None
 
-        state      = self.controller.state
-        start_z    = state["start_zone"]
-        dest_z     = state["destination_zone"]
-        travellers = state["travellers"]
-        payment    = state.get("payment_method", "unknown").upper()
-
-        issue_time  = datetime.now()
-        zones_count = calculate_zones_travelled(start_z, dest_z)
+        # Same transaction details as the on-screen voucher: same issue
+        # time, same reference and same fare breakdown (AC 4.2).
+        details = self.transaction_details()
+        start_z = details["start_z"]
+        dest_z = details["dest_z"]
+        zones_count = details["zones"]
+        breakdown = details["breakdown"]
+        payment = details["payment"]
+        issue_time = details["issue_time"]
 
         # Create a temp file for the PDF
         tmp = tempfile.NamedTemporaryFile(
@@ -1757,11 +2703,10 @@ class VoucherScreen(tk.Frame):
         styles = getSampleStyleSheet()
 
         # Custom paragraph styles
-        _navy   = colors.HexColor("#1B2A4A")
-        _gold   = colors.HexColor("#F0A500")
-        _white  = colors.white
-        _green  = colors.HexColor("#27AE60")
-        _light  = colors.HexColor("#C8D6E5")
+        _navy = colors.HexColor("#1B2A4A")
+        _gold = colors.HexColor("#F0A500")
+        _white = colors.white
+        _light = colors.HexColor("#C8D6E5")
 
         title_style = ParagraphStyle(
             "CTATitle",
@@ -1780,21 +2725,6 @@ class VoucherScreen(tk.Frame):
             textColor=_white,
             alignment=1,
             spaceAfter=0,
-        )
-        body_style = ParagraphStyle(
-            "CTABody",
-            parent=styles["Normal"],
-            fontName="Helvetica",
-            fontSize=10,
-            textColor=_navy,
-            spaceAfter=4,
-        )
-        label_style = ParagraphStyle(
-            "CTALabel",
-            parent=styles["Normal"],
-            fontName="Helvetica-Bold",
-            fontSize=10,
-            textColor=_navy,
         )
         section_style = ParagraphStyle(
             "CTASection",
@@ -1843,7 +2773,7 @@ class VoucherScreen(tk.Frame):
         issue_data = [
             ["Issued:", issue_time.strftime("%A, %d %B %Y")],
             ["Time:",   issue_time.strftime("%H:%M:%S")],
-            ["Ref:",    f"CTA-{issue_time.strftime('%Y%m%d-%H%M%S')}"],
+            ["Ref:",    details["reference"]],
         ]
         issue_table = Table(issue_data, colWidths=[35 * mm, page_w - 35 * mm])
         issue_table.setStyle(TableStyle([
@@ -1891,33 +2821,28 @@ class VoucherScreen(tk.Frame):
         # ---- Fare breakdown table ----
         content.append(Paragraph("FARE BREAKDOWN", section_style))
 
-        fare_header = ["Category", "Qty", "Rate/Zone", "Zones", "Total"]
-        fare_rows   = [fare_header]
+        fare_header = [
+            "Category", "Qty", "Rate/Zone", "Zones", "Total (cents)"
+        ]
+        fare_rows = [fare_header]
 
-        grand_pence = 0
-        grand_pax   = 0
-
-        for t in TRAVELLER_TYPES:
-            count = travellers.get(t["key"], 0)
-            if count == 0:
-                continue
-            total_p     = calculate_fare(t["fare"], zones_count, count)
-            grand_pence += total_p
-            grand_pax   += count
+        # All four categories, including zero counts (AC 2.2 / 3.1)
+        for row in breakdown["rows"]:
             fare_rows.append([
-                t["label"],
-                str(count),
-                pence_to_display(t["fare"]),
-                str(zones_count),
-                pence_to_display(total_p),
+                row["label"],
+                str(row["count"]),
+                cents_to_display(row["rate"]),
+                str(row["zones"]),
+                cents_to_display(row["total"]),
             ])
 
         # Totals row
         fare_rows.append([
-            "TOTAL", str(grand_pax), "", "", pence_to_display(grand_pence)
+            "TOTAL", str(breakdown["total_pax"]), "", "",
+            cents_to_display(breakdown["total_cents"])
         ])
 
-        col_w = [45 * mm, 15 * mm, 30 * mm, 20 * mm, 30 * mm]
+        col_w = [40 * mm, 15 * mm, 32 * mm, 18 * mm, 35 * mm]
         fare_table = Table(fare_rows, colWidths=col_w)
         fare_table.setStyle(TableStyle([
             # Header row
@@ -2012,7 +2937,10 @@ class VoucherScreen(tk.Frame):
         self._last_pdf = pdf_path
 
         # Open the in-app PDF preview window
-        PDFPreviewWindow(self, pdf_path, self._voucher_text)
+        PDFPreviewWindow(
+            self, pdf_path, self._voucher_text,
+            reference=self.controller.state["reference"]
+        )
 
         # Also launch the OS default PDF viewer
         try:
@@ -2022,8 +2950,10 @@ class VoucherScreen(tk.Frame):
                 subprocess.Popen(["open", pdf_path])
             else:
                 subprocess.Popen(["xdg-open", pdf_path])
-        except Exception:
-            pass   # Preview window already open; viewer launch is optional
+        except Exception as exc:   # Viewer launch is optional
+            # [ENH-7] The in-app preview is already open, so the user is
+            # not interrupted; the cause is recorded for support staff.
+            logger.warning("Could not open external PDF viewer: %s", exc)
 
     def _print_receipt(self):
         """
@@ -2071,6 +3001,7 @@ class VoucherScreen(tk.Frame):
                     raise RuntimeError(result.stderr)
 
         except Exception as exc:
+            logger.warning("Printing failed: %s", exc)       # [ENH-7]
             self._save_receipt_fallback(str(exc))
 
     def _save_receipt_fallback(self, error_msg: str):
@@ -2131,10 +3062,14 @@ class PDFPreviewWindow(tk.Toplevel):
     a 'Save PDF' button to save the file to a user-chosen location.
     """
 
-    def __init__(self, parent, pdf_path: str, voucher_text: str):
+    def __init__(
+        self, parent, pdf_path: str, voucher_text: str,
+        reference: str = "CTA_Voucher"
+    ):
         super().__init__(parent)
-        self._pdf_path    = pdf_path
+        self._pdf_path = pdf_path
         self._voucher_txt = voucher_text
+        self._reference = reference   # Used as the default file name
 
         self.title("\U0001f4c4  CTA Receipt \u2013 PDF Preview")
         self.geometry("660x820")
@@ -2199,7 +3134,7 @@ class PDFPreviewWindow(tk.Toplevel):
         # A4-like white page rendered on the canvas
         # A4 aspect ratio ≈ 210 : 297 → use 580 × 820 px
         page_w, page_h = 580, 820
-        margin         = 20   # canvas border around the page
+        margin = 20   # canvas border around the page
 
         canvas.config(
             scrollregion=(0, 0, page_w + 2 * margin, page_h + 2 * margin)
@@ -2220,15 +3155,32 @@ class PDFPreviewWindow(tk.Toplevel):
 
         self._draw_receipt_on_canvas(canvas, margin, page_w, page_h)
 
-        # Bind mouse-wheel scrolling
-        canvas.bind_all("<MouseWheel>",
-                        lambda e: canvas.yview_scroll(
-                            -1 * (e.delta // 120), "units"
-                        ))
-        canvas.bind_all("<Button-4>",
-                        lambda e: canvas.yview_scroll(-1, "units"))
-        canvas.bind_all("<Button-5>",
-                        lambda e: canvas.yview_scroll(1, "units"))
+        # Mouse-wheel scrolling. The wheel is bound only while the
+        # pointer is over the page and is released when it leaves, so
+        # no global binding survives after this window is closed.
+        # (v3.5 used bind_all permanently; scrolling in the main window
+        # after closing the preview then raised a TclError.)
+        def _on_wheel(event):
+            canvas.yview_scroll(-1 * (event.delta // 120), "units")
+
+        def _bind_wheel(_event):
+            canvas.bind_all("<MouseWheel>", _on_wheel)
+            canvas.bind_all(
+                "<Button-4>", lambda e: canvas.yview_scroll(-1, "units")
+            )
+            canvas.bind_all(
+                "<Button-5>", lambda e: canvas.yview_scroll(1, "units")
+            )
+
+        def _unbind_wheel(_event=None):
+            for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                canvas.unbind_all(sequence)
+
+        canvas.bind("<Enter>", _bind_wheel)
+        canvas.bind("<Leave>", _unbind_wheel)
+        self.protocol(
+            "WM_DELETE_WINDOW", lambda: (_unbind_wheel(), self.destroy())
+        )
 
     def _draw_receipt_on_canvas(
         self, canvas: tk.Canvas, margin: int,
@@ -2243,8 +3195,8 @@ class PDFPreviewWindow(tk.Toplevel):
             page_w  : Width of the A4-page area in pixels.
             page_h  : Height of the A4-page area in pixels.
         """
-        _navy  = "#1B2A4A"
-        _gold  = "#F0A500"
+        _navy = "#1B2A4A"
+        _gold = "#F0A500"
         _light = "#DDEEFF"
         _white = "#FFFFFF"
 
@@ -2273,9 +3225,9 @@ class PDFPreviewWindow(tk.Toplevel):
         # ---- Parse and render receipt lines ----
         lines = self._voucher_txt.split("\n")
 
-        y       = margin + 84   # Start y below header band
-        lh      = 15            # Line height in pixels
-        pad_x   = x0 + 28      # Left text margin
+        y = margin + 84   # Start y below header band
+        lh = 15            # Line height in pixels
+        pad_x = x0 + 28      # Left text margin
         mono_fn = ("Courier New", 9)
         bold_fn = ("Courier New", 9, "bold")
 
@@ -2307,10 +3259,11 @@ class PDFPreviewWindow(tk.Toplevel):
                 "CENTRALA TRANSPORT AUTHORITY",
                 "OFFICIAL TRAVEL VOUCHER",
             ):
+                # anchor="n" centres the heading on cx (v3.5 used "w",
+                # which started the text at the centre line instead)
                 canvas.create_text(
-                    cx, y, text=stripped,
-                    font=bold_fn, fill=_gold, anchor="w",
-                    width=page_w - 40
+                    cx, y + 2, text=stripped,
+                    font=bold_fn, fill=_gold, anchor="n"
                 )
                 y += lh
                 continue
@@ -2360,17 +3313,43 @@ class PDFPreviewWindow(tk.Toplevel):
         )
 
     def _save_pdf(self):
-        """Save the PDF file to a user-chosen location."""
+        """
+        Save a copy of the PDF receipt to a location chosen by the user.
+
+        Behaviour (corrected description, IQA October 2026, AC 4.2):
+        the preview window deliberately STAYS OPEN after saving, so the
+        user can still print or check the receipt. This method does not
+        close the window; the v3.5 test record claiming that it did was
+        inaccurate and has been withdrawn.
+
+        If the copy fails (for example the destination file is open in
+        another program, or the folder is read-only) the error is shown
+        to the user instead of crashing the program.
+        """
         dest = filedialog.asksaveasfilename(
+            parent=self,
             defaultextension=".pdf",
             filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
-            initialfile="CTA_Voucher.pdf",
+            initialfile=f"{self._reference}.pdf",
             title="Save PDF Receipt"
         )
-        if dest:
-            import shutil
+        if not dest:            # User pressed Cancel
+            return
+
+        try:
             shutil.copy2(self._pdf_path, dest)
-            messagebox.showinfo("Saved", f"PDF saved to:\n{dest}")
+        except OSError as exc:
+            logger.error("Saving PDF to %s failed: %s", dest, exc)  # ENH-7
+            messagebox.showerror(
+                "Save Failed",
+                f"The PDF could not be saved:\n{exc}",
+                parent=self
+            )
+            return
+
+        messagebox.showinfo(
+            "Saved", f"PDF saved to:\n{dest}", parent=self
+        )
 
     def _print_pdf(self):
         """Send the PDF file to the system printer."""
@@ -2386,10 +3365,171 @@ class PDFPreviewWindow(tk.Toplevel):
                 "Printing", "PDF sent to the default printer."
             )
         except Exception as exc:
+            logger.warning("PDF printing failed: %s", exc)    # [ENH-7]
             messagebox.showerror(
                 "Print Error",
                 f"Could not print the PDF:\n{exc}"
             )
+
+
+# ===========================================================================
+# AUTOMATED SELF-TESTS  (run with:  python <this file> --selftest)
+# ===========================================================================
+
+def run_self_tests() -> bool:
+    """
+    Run automated checks that support the test plan (AC 4.1 / 4.2).
+
+    Each check prints PASS or FAIL with the expected and actual values,
+    so the output can be pasted into the test log as evidence. The
+    calculation tests need no GUI. The GUI tests (AT15 to AT18) open
+    a hidden window and are skipped if no display is available.
+
+    Returns:
+        bool: True if every check passed.
+    """
+    results = []
+
+    def check(test_id: str, description: str, expected, actual):
+        """Record and print one test result."""
+        passed = expected == actual
+        results.append(passed)
+        status = "PASS" if passed else "FAIL"
+        print(f"[{status}] {test_id}  {description}")
+        if not passed:
+            print(f"         expected: {expected!r}")
+            print(f"         actual  : {actual!r}")
+
+    print("CTA Automated Ticketing System - self-tests")
+    print("=" * 60)
+
+    # AT1 - reference data matches Appendix 1
+    check("AT1", "Station data passes validate_reference_data()",
+          [], validate_reference_data())
+    check("AT2", "Station counts per zone are 10 / 12 / 14",
+          [10, 12, 14], [len(ZONES[z]["stations"]) for z in (1, 2, 3)])
+    check("AT3", "Lomil is Central; Riclya and Sylas are Midtown",
+          (True, True, True),
+          ("Lomil" in ZONES[1]["stations"],
+           "Riclya" in ZONES[2]["stations"],
+           "Sylas" in ZONES[2]["stations"]))
+
+    # AT4 - zones travelled (|dest - start| + 1)
+    check("AT4", "Zones travelled: 1->3 = 3, 2->2 = 1, 3->1 = 3",
+          [3, 1, 3],
+          [calculate_zones_travelled(1, 3),
+           calculate_zones_travelled(2, 2),
+           calculate_zones_travelled(3, 1)])
+
+    # AT5 - fare arithmetic from Appendix 2
+    one_each = {"adult": 1, "child": 1, "senior": 1, "student": 1}
+    check("AT5", "One of each category over 3 zones = 18870 cents",
+          18870, build_fare_breakdown(one_each, 3)["total_cents"])
+
+    # AT6 - zero-count categories are still listed on the voucher
+    partial = {"adult": 2, "child": 1, "senior": 0, "student": 0}
+    rows = build_fare_breakdown(partial, 2)["rows"]
+    check("AT6", "Voucher lists all 4 categories when some are 0",
+          ["adult", "child", "senior", "student"],
+          [row["key"] for row in rows])
+    check("AT7", "Zero-count rows show count 0 and total 0",
+          [(0, 0), (0, 0)],
+          [(row["count"], row["total"]) for row in rows[2:]])
+
+    # AT8 - references are unique within the same second
+    same_second = datetime(2026, 10, 23, 14, 30, 5)
+    refs = [generate_reference(same_second) for _ in range(5)]
+    check("AT8", "5 references issued in the same second are unique",
+          5, len(set(refs)))
+
+    # AT9 - validation boundaries
+    check("AT9", "Validation: '', 'abc', '-1', '51' rejected; "
+          "'0' and '50' accepted",
+          [False, False, False, False, True, True],
+          [validate_positive_integer(v, "Adults")[0]
+           for v in ("", "abc", "-1", "51", "0", "50")])
+
+    # AT10-AT12 - [ENH-1] station finder
+    check("AT10", "find_station ignores case and spaces (' lomil ')",
+          (1, "Lomil"), find_station(" lomil "))
+    check("AT11", "find_station returns None for an unknown name",
+          None, find_station("Paris"))
+    check("AT12", "suggest_stations('ri') lists starts, then contains",
+          ["Riclya", "Riladia", "Ederif", "Garion", "Perinad"],
+          suggest_stations("ri"))
+
+    # AT13-AT14 - [ENH-3] / [ENH-4] transaction log and sales summary.
+    # A temporary folder is used so the real log is never touched.
+    with tempfile.TemporaryDirectory() as folder:
+        test_log = os.path.join(folder, "test_transactions.csv")
+        day = datetime(2026, 10, 23, 9, 0, 0)
+        for counts, method in (
+            ({"adult": 2, "child": 1, "senior": 0, "student": 0}, "CARD"),
+            ({"adult": 0, "child": 0, "senior": 1, "student": 2}, "CASH"),
+        ):
+            record_transaction({
+                "reference": generate_reference(day),
+                "issue_time": day, "start_name": "Central",
+                "dest_name": "Downtown", "zones": 3,
+                "breakdown": build_fare_breakdown(counts, 3),
+                "payment": method,
+            }, log_path=test_log)
+
+        summary = summarise_sales(test_log, "2026-10-23")
+        # 2*2105*3 + 1410*3 = 16860 ; 1025*3 + 2*1750*3 = 13575
+        check("AT13", "Log 2 vouchers -> summary 2 vouchers, 6 "
+              "travellers, 30435 cents",
+              (2, 6, 30435, {"CARD": 1, "CASH": 1}),
+              (summary["vouchers"], summary["travellers"],
+               summary["total_cents"], summary["by_payment"]))
+
+        with open(test_log, "a", encoding="utf-8") as handle:
+            handle.write("BAD-ROW,2026-10-23,,,,,,,,,,not-a-number,\n")
+        check("AT14", "A damaged row is skipped, not counted",
+              (2, 1), (summarise_sales(test_log, "2026-10-23")["vouchers"],
+                       summarise_sales(test_log, "2026-10-23")["skipped"]))
+
+    # AT15 - New Ticket clears the screen inputs (needs a display)
+    try:
+        app = CTATicketingApp()
+        app.withdraw()
+        zone_screen = app.frames["ZoneSelectionScreen"]
+        trav_screen = app.frames["TravellerScreen"]
+        zone_screen.start_var.set(1)
+        zone_screen.destination_var.set(3)
+        trav_screen.inputs["adult"].set("4")
+        app.reset_state()
+        check("AT15", "reset_state() clears zone and traveller inputs",
+              (0, 0, ["0", "0", "0", "0"]),
+              (zone_screen.start_var.get(),
+               zone_screen.destination_var.get(),
+               [var.get() for var in trav_screen.inputs.values()]))
+
+        # AT16 - [ENH-2] live preview: Central -> Downtown, 2 adults
+        app.state["start_zone"], app.state["destination_zone"] = 1, 3
+        trav_screen.inputs["adult"].set("2")
+        check("AT16", "Live preview shows 12630 cents for 2 adults, "
+              "3 zones",
+              True, "12630 cents" in trav_screen.live_total_label["text"])
+
+        # AT17 - [ENH-6] Escape on the traveller screen goes back
+        app.show_frame("TravellerScreen")
+        app._dispatch_key("on_escape")
+        check("AT17", "Escape on traveller screen returns to zones",
+              "ZoneSelectionScreen", app.current_frame)
+
+        # AT18 - [ENH-5] idle timeout returns to the board and resets
+        app._on_idle_timeout()
+        check("AT18", "Idle timeout returns to board and clears zones",
+              ("WelcomeScreen", None),
+              (app.current_frame, app.state["start_zone"]))
+        app.destroy()
+    except tk.TclError:
+        print("[SKIP] AT15-AT18  GUI tests need a display")
+
+    print("=" * 60)
+    print(f"{sum(results)} of {len(results)} checks passed.")
+    return all(results)
 
 
 # ===========================================================================
@@ -2400,10 +3540,15 @@ def main():
     """
     Application entry point.
 
-    Creates the root CTATicketingApp instance and starts the Tkinter
-    event loop. The loop runs indefinitely, processing GUI events
-    until the user closes the window or clicks Exit.
+    With --selftest, runs the automated checks and exits with code 0
+    (all passed) or 1 (a check failed). Otherwise creates the root
+    CTATicketingApp window and starts the tkinter event loop, which
+    runs until the user clicks Exit or closes the window.
     """
+    if "--selftest" in sys.argv:
+        sys.exit(0 if run_self_tests() else 1)
+
+    configure_logging()             # [ENH-7] GUI runs only
     app = CTATicketingApp()
     app.mainloop()
 
