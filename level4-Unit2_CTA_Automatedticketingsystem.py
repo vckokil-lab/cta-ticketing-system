@@ -8,7 +8,7 @@
  Assessment  : Assignment Task 3 – Implementation & Testing
  Description : A zone-based ticketing system for the Centrala Underground.
                Built with Python (tkinter) following PEP 8 style guidelines.
- Version     : 4.1.0 (IQA amendment + enhancements – October 2026)
+ Version     : 4.1.2 (IQA amendment + enhancements – October 2026)
  Date        : March 2026 (amended September and October 2026)
  File        : level4-Unit2_CTA_Automatedticketingsystem.py
 =============================================================================
@@ -27,6 +27,12 @@ receipt; the rest of the program runs without it.
 
 CHANGE LOG
 ----------
+v4.1.2  October 2026 – traveller counts accept only ASCII digits 0-9
+         and very long numbers are rejected before conversion (both
+         previously crashed); negative CSV totals are skipped in the
+         sales summary. Tests AT19-AT20 added.
+v4.1.1  October 2026 – voucher box sized to show all 31 lines; payment
+         refused if journey zones are missing (found in testing).
 v4.1.0  October 2026 – enhancements (all OPTIONAL, beyond the brief).
   Each is tagged [ENH-n] in the code so it can be found with a search.
   [ENH-1] Station finder. The traveller types a station name and the
@@ -354,10 +360,23 @@ def validate_positive_integer(
             f"{field_name}: Please enter a number (0 if none)."
         )
 
-    if not stripped.isdigit():
+    # Only the ASCII digits 0-9 are accepted. str.isdigit() alone also
+    # accepts characters such as "²" or "١", which int() then rejects
+    # with a crash (v4.1.2 fix, found by tracing the validation flow).
+    if not (stripped.isascii() and stripped.isdigit()):
         return (
             False, None,
             f"{field_name}: Must be a whole number (e.g. 0, 1, 2)."
+        )
+
+    # Very long inputs are rejected BEFORE int() is called. Python
+    # refuses to convert numbers longer than about 4300 digits, and no
+    # valid count needs more than two (v4.1.2 fix).
+    if len(stripped.lstrip("0")) > len(str(MAX_TRAVELLERS_PER_TYPE)):
+        return (
+            False, None,
+            f"{field_name}: A maximum of {MAX_TRAVELLERS_PER_TYPE} "
+            f"travellers of one type can be added to one voucher."
         )
 
     number = int(stripped)
@@ -645,6 +664,13 @@ def summarise_sales(log_path: str = TRANSACTION_LOG_FILE,
                 travellers = int(row["total_travellers"])
                 cents = int(row["total_cents"])
             except (KeyError, TypeError, ValueError):
+                summary["skipped"] += 1
+                continue
+
+            # A negative total can only come from a hand-edited file, so
+            # it is skipped rather than reducing the day's takings
+            # (v4.1.2 fix).
+            if travellers < 0 or cents < 0:
                 summary["skipped"] += 1
                 continue
 
@@ -2479,20 +2505,29 @@ class VoucherScreen(tk.Frame):
             relief="flat",
             state="disabled",   # Read-only; briefly enabled to insert
             padx=16, pady=14,
-            wrap="none"
+            wrap="none",
+            # The voucher has 31 lines. tk.Text defaults to 24, which
+            # clipped the last lines (seen in testing), so the box is
+            # sized to show the whole voucher without scrolling.
+            height=32
         )
-        self.voucher_text_widget.pack(fill="both", expand=True)
 
         sb = ttk.Scrollbar(
             voucher_frame, orient="vertical",
             command=self.voucher_text_widget.yview
         )
         self.voucher_text_widget.configure(yscrollcommand=sb.set)
+        # The scrollbar is packed FIRST so it sits beside the text. In
+        # v4.1.0 it was packed after the text and was squeezed below it.
         sb.pack(side="right", fill="y")
+        self.voucher_text_widget.pack(side="left", fill="both", expand=True)
 
         # --- Action button row ---
         btn_frame = tk.Frame(self, bg=COLOUR_BG, pady=12)
-        btn_frame.pack(fill="x")
+        # Packed at the bottom BEFORE the voucher box, so the buttons
+        # keep their space on small windows and the voucher scrolls
+        # instead of pushing the buttons off the screen.
+        btn_frame.pack(side="bottom", fill="x", before=voucher_frame)
 
         # Print Receipt
         tk.Button(
@@ -3488,6 +3523,28 @@ def run_self_tests() -> bool:
         check("AT14", "A damaged row is skipped, not counted",
               (2, 1), (summarise_sales(test_log, "2026-10-23")["vouchers"],
                        summarise_sales(test_log, "2026-10-23")["skipped"]))
+
+    # AT19 - v4.1.2: unusual or very long digits are rejected, not crashed
+    check("AT19", "Validation rejects '²', '١' and a 5000-digit number "
+          "without crashing",
+          [False, False, False],
+          [validate_positive_integer(v, "Adults")[0]
+           for v in ("²", "١", "9" * 5000)])
+
+    # AT20 - v4.1.2: a negative total in the CSV is skipped
+    with tempfile.TemporaryDirectory() as folder:
+        test_log = os.path.join(folder, "negative.csv")
+        with open(test_log, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=TRANSACTION_FIELDS)
+            writer.writeheader()
+            writer.writerow({**{f: "" for f in TRANSACTION_FIELDS},
+                             "date": "2026-10-23", "total_travellers": "2",
+                             "total_cents": "-5000"})
+        negative = summarise_sales(test_log, "2026-10-23")
+        check("AT20", "A negative CSV total is skipped, not subtracted",
+              (0, 0, 1),
+              (negative["vouchers"], negative["total_cents"],
+               negative["skipped"]))
 
     # AT15 - New Ticket clears the screen inputs (needs a display)
     try:

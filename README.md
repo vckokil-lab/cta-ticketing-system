@@ -4,7 +4,7 @@ ATHE Level 4 Diploma in Computing — Unit 2: Programming and Scripting
 
 Student: Chomanand Kokil
 Institution: South London College
-Version: 4.1.1 — October 2026 (resubmission following IQA feedback dated 16.10.2026)
+Version: 4.1.2 — October 2026 (resubmission following IQA feedback dated 16.10.2026)
 Program file: `level4-Unit2_CTA_Automatedticketingsystem.py`
 
 A zone-based ticketing system for the Centrala Underground, written in Python with a tkinter interface. Travellers choose a boarding and destination zone, enter the number of Adult, Child, Senior and Student travellers, and receive a travel voucher. All fares are held and shown in integer cents, as stated in the client brief.
@@ -27,7 +27,7 @@ pip install -r requirements.txt
 python level4-Unit2_CTA_Automatedticketingsystem.py
 ```
 
-**Run the automated self-tests (18 checks)**
+**Run the automated self-tests (20 checks)**
 
 ```
 python level4-Unit2_CTA_Automatedticketingsystem.py --selftest
@@ -49,5 +49,6 @@ The program creates `cta_transactions.csv` (a log of issued vouchers) next to it
 | 3.5.0 | September 2026 | Fares changed from pence/pounds to cents. Submitted to the college but not committed to this repository. |
 | 4.0.0 | October 2026 | IQA amendments: station zones corrected, zero-count categories shown, full input reset, unique voucher references. Not committed separately. |
 | 4.1.1 | October 2026 | Enhancements ENH-1 to ENH-7, automated self-tests, voucher display fix, payment guard (tag `v4.1.1`). |
+| 4.1.2 | October 2026 | Traveller counts accept only plain digits 0 to 50 (pasted symbols such as '²' and very long numbers are rejected safely); the sales summary skips rows with negative totals; self-tests AT19 and AT20 added (tag `v4.1.2`). |
 
 The full change log is in the header comment of the program file.
