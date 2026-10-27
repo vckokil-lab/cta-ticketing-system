@@ -8,7 +8,7 @@
  Assessment  : Assignment Task 3 – Implementation & Testing
  Description : A zone-based ticketing system for the Centrala Underground.
                Built with Python (tkinter) following PEP 8 style guidelines.
- Version     : 4.1.2 (IQA amendment + enhancements – October 2026)
+ Version     : 4.1.3 (October 2026)
  Date        : March 2026 (amended September and October 2026)
  File        : level4-Unit2_CTA_Automatedticketingsystem.py
 =============================================================================
@@ -27,6 +27,12 @@ receipt; the rest of the program runs without it.
 
 CHANGE LOG
 ----------
+v4.1.3  October 2026 – one parsing rule for traveller counts. Leading
+         zeros are removed before the length check, so a very long
+         string of zeros can no longer reach int() and fail; the -/+
+         stepper uses the same rule through step_count(), so unusual
+         digits such as '²' typed into a field no longer raise an
+         error when a stepper button is pressed. Tests AT21-AT22.
 v4.1.2  October 2026 – traveller counts accept only ASCII digits 0-9
          and very long numbers are rejected before conversion (both
          previously crashed); negative CSV totals are skipped in the
@@ -372,14 +378,18 @@ def validate_positive_integer(
     # Very long inputs are rejected BEFORE int() is called. Python
     # refuses to convert numbers longer than about 4300 digits, and no
     # valid count needs more than two (v4.1.2 fix).
-    if len(stripped.lstrip("0")) > len(str(MAX_TRAVELLERS_PER_TYPE)):
+    # v4.1.3: leading zeros are removed first, so only the significant
+    # digits are measured and converted. Before this, a long run of
+    # zeros passed the length check and int() rejected the whole string.
+    digits = stripped.lstrip("0") or "0"
+    if len(digits) > len(str(MAX_TRAVELLERS_PER_TYPE)):
         return (
             False, None,
             f"{field_name}: A maximum of {MAX_TRAVELLERS_PER_TYPE} "
             f"travellers of one type can be added to one voucher."
         )
 
-    number = int(stripped)
+    number = int(digits)
     if number > MAX_TRAVELLERS_PER_TYPE:
         return (
             False, None,
@@ -388,6 +398,34 @@ def validate_positive_integer(
         )
 
     return True, number, ""
+
+
+def step_count(text: str, delta: int) -> str:
+    """
+    Return the new value of a traveller count after a - or + press.
+
+    Uses the same parsing rule as validate_positive_integer(): only the
+    ASCII digits 0-9 are accepted and leading zeros are ignored. Any
+    other text resets the field to "0"; a number above the limit is
+    treated as the limit. The result is always between 0 and
+    MAX_TRAVELLERS_PER_TYPE (v4.1.3).
+
+    Args:
+        text  (str): Current contents of the entry field.
+        delta (int): +1 for the + button, -1 for the - button.
+
+    Returns:
+        str: The new count as text, for example "3".
+    """
+    current = text.strip()
+    if not (current.isascii() and current.isdigit()):
+        return "0"
+    digits = current.lstrip("0") or "0"
+    if len(digits) > len(str(MAX_TRAVELLERS_PER_TYPE)):
+        value = MAX_TRAVELLERS_PER_TYPE
+    else:
+        value = int(digits)
+    return str(min(MAX_TRAVELLERS_PER_TYPE, max(0, value + delta)))
 
 
 def build_fare_breakdown(travellers: dict, zones: int) -> dict:
@@ -1644,12 +1682,8 @@ class TravellerScreen(tk.Frame):
             var   (tk.StringVar): Variable bound to the entry field.
             delta (int)         : +1 to increment, -1 to decrement.
         """
-        current = var.get().strip()
-        if not current.isdigit():
-            var.set("0")
-            return
-        new_value = int(current) + delta
-        var.set(str(min(MAX_TRAVELLERS_PER_TYPE, max(0, new_value))))
+        # v4.1.3: shared parsing rule (see step_count()).
+        var.set(step_count(var.get(), delta))
 
     def _build_rate_table(self):
         """Build a compact fare rate reference summary."""
@@ -3530,6 +3564,21 @@ def run_self_tests() -> bool:
           [False, False, False],
           [validate_positive_integer(v, "Adults")[0]
            for v in ("²", "١", "9" * 5000)])
+
+    # AT21 - v4.1.3: leading zeros are ignored, so a very long run of
+    # zeros is parsed safely instead of failing inside int()
+    check("AT21", "Validation parses 5000 leading zeros safely "
+          "('0...05' -> 5; '0...051' rejected)",
+          [(True, 5), (False, None)],
+          [validate_positive_integer("0" * 5000 + v, "Adults")[:2]
+           for v in ("5", "51")])
+
+    # AT22 - v4.1.3: the -/+ stepper uses the same rule and never fails
+    check("AT22", "Stepper: '²'+1 -> 0, '0...07'+1 -> 8, '99'-1 -> 50, "
+          "'50'+1 -> 50, '0'-1 -> 0",
+          ["0", "8", "50", "50", "0"],
+          [step_count("²", 1), step_count("0" * 5000 + "7", 1),
+           step_count("99", -1), step_count("50", 1), step_count("0", -1)])
 
     # AT20 - v4.1.2: a negative total in the CSV is skipped
     with tempfile.TemporaryDirectory() as folder:
